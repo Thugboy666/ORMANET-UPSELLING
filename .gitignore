@@ -7,34 +7,46 @@ __pycache__/
 *.pyc
 *.pyo
 
-# --- Runtime (Python embedded, exe, dll) ---
-runtime/*
-!runtime/.gitkeep
-!runtime/git/
-!runtime/git/.gitkeep
-!runtime/python310/.gitkeep
+# =========================
+# LOCAL RUNTIME (PORTABLE)
+# =========================
+/runtime/git/
+/runtime/python310/
+/runtime/.env
 
-# --- Local environment ---
-.env
+# =========================
+# LOCAL DATA (NEVER COMMIT)
+# =========================
+/import/
+/logs/
+/output/
 
-# --- Logs ---
-logs/*
-!logs/.gitkeep
-
-# --- Output files ---
-output/*
-!output/.gitkeep
-
-# --- Imported business data (NEVER commit) ---
-import/*.xlsx
-import/ORDINI/*.xlsx
+# =========================
+# TEMP / LOG FILES
+# =========================
+*.log
+*.tmp
+*.cache
 
 # --- Temporary / backup files ---
-*.tmp
 *.bak
 *.old
 ~$*.xlsx
 
-# --- OS ---
+# =========================
+# OS / EDITORS
+# =========================
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+
+# --- Local environment ---
+.env
+
+# =========================
+# SAFETY
+# =========================
+*.xlsx
+*.csv
+*.zip
