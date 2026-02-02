@@ -38,6 +38,7 @@ ORMANET_UPSELLING/
    ```powershell
    .\start.ps1
    ```
+4. Si apre il browser su `http://127.0.0.1:8765`.
 
 ## Arresto
 ```powershell
@@ -63,8 +64,8 @@ Poi esegui:
 .\git_pull.ps1
 ```
 
-## Note GUI
-- Seleziona il cliente da `CLIENTI.xlsx`.
-- Carica lo stock, i 4 storici, e l'ordine corrente.
+## Note Web UI
+- Premi **Carica default** per leggere `CLIENTI.xlsx` e `STOCK.xlsx`.
+- Seleziona il cliente, l'ordine upsell e 4 storici (STORICO-*.xlsx).
 - Seleziona la causale e l'aggressività sconto.
 - Calcola l'upsell, copia i valori o esporta l'Excel in `output/preventivo.xlsx`.
