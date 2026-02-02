@@ -19,15 +19,15 @@ if (Test-Path $pidFile) {
       Remove-Item $pidFile -Force
       exit 0
     } catch {
-      Write-StopLog "Errore stop PID $pid: $($_.Exception.Message)"
+      Write-StopLog "Errore stop PID ${pid}: $($_.Exception.Message)"
     }
   }
 }
 
-$process = Get-Process | Where-Object { $_.Path -like "*app_gui.py" }
+$process = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*app\\server.py*" }
 if ($process) {
-  $process | Stop-Process -Force
-  Write-StopLog "Stop process by name app_gui.py"
+  $process | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  Write-StopLog "Stop process by name app\\server.py"
   exit 0
 }
 
