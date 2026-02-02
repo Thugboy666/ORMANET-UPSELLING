@@ -5,6 +5,13 @@
 - Python embedded 3.10 (portabile) copiato in `runtime/python310`
 - Dipendenza: `openpyxl` (installata dentro l'ambiente embedded)
 
+## Git setup
+Opzione consigliata:
+- **Installa Git per Windows** (consigliato). Assicurati che `git.exe` sia disponibile nel PATH oppure in `C:\Program Files\Git\cmd\git.exe`.
+
+Alternativa portable:
+- **Portable Git**: copia Git in `runtime/git/` in modo che esista `runtime/git/cmd/git.exe`.
+
 ## Struttura cartelle
 ```
 ORMANET_UPSELLING/
