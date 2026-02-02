@@ -16,14 +16,14 @@ if (!(Test-Path $runtimeDir)) {
 $stdoutLog = Join-Path $logDir "stdout.log"
 $stderrLog = Join-Path $logDir "stderr.log"
 $pidFile = Join-Path $runtimeDir "app.pid"
-$scriptPath = Join-Path $baseDir "app\server.py"
+$modulePath = "app.server"
 
 if (!(Test-Path $pythonExe)) {
   Write-Host "Python embedded non trovato in runtime/python310."
   exit 1
 }
 
-$process = Start-Process -FilePath $pythonExe -ArgumentList $scriptPath -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+$process = Start-Process -FilePath $pythonExe -ArgumentList "-m $modulePath" -WorkingDirectory $baseDir -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 $process.Id | Out-File -FilePath $pidFile -Encoding ascii
 Write-Host "Avviato. PID: $($process.Id)"
 Start-Sleep -Seconds 1

@@ -11,23 +11,23 @@ function Write-StopLog($message) {
 }
 
 if (Test-Path $pidFile) {
-  $pid = Get-Content $pidFile | Select-Object -First 1
-  if ($pid) {
+  $appPid = Get-Content $pidFile | Select-Object -First 1
+  if ($appPid) {
     try {
-      Stop-Process -Id $pid -Force
-      Write-StopLog "Stop process PID $pid"
+      Stop-Process -Id $appPid -Force
+      Write-StopLog "Stop process PID $appPid"
       Remove-Item $pidFile -Force
       exit 0
     } catch {
-      Write-StopLog "Errore stop PID ${pid}: $($_.Exception.Message)"
+      Write-StopLog "Errore stop PID ${appPid}: $($_.Exception.Message)"
     }
   }
 }
 
-$process = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*app\\server.py*" }
+$process = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*-m app.server*" }
 if ($process) {
   $process | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-  Write-StopLog "Stop process by name app\\server.py"
+  Write-StopLog "Stop process by module app.server"
   exit 0
 }
 

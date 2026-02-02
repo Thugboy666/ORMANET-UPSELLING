@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import traceback
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from engine import (
+from app.engine import (
     AGGRESSIVITA_STEPS,
     CAUSALI,
     ClientInfo,
@@ -21,8 +23,8 @@ from engine import (
     export_excel,
     load_json,
 )
-from io_loaders import load_clients, load_orders, load_stock
-from web_ui import HTML
+from app.io_loaders import load_clients, load_orders, load_stock
+from app.web_ui import HTML
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 IMPORT_DIR = BASE_DIR / "import"
@@ -345,4 +347,8 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        raise
