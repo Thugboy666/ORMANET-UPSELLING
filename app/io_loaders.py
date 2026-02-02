@@ -6,7 +6,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from engine import ClientInfo, OrderItem, SessionLogger, StockItem
+from app.engine import ClientInfo, OrderItem, SessionLogger, StockItem
 
 
 def load_clients(path: Path, logger: SessionLogger) -> list[ClientInfo]:
