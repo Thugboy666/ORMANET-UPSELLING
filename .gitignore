@@ -1,0 +1,38 @@
+# =========================
+# ORMANET UPSELLING - GITIGNORE
+# =========================
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Runtime (Python embedded, exe, dll) ---
+runtime/*
+!runtime/.gitkeep
+!runtime/python310/.gitkeep
+
+# --- Local environment ---
+.env
+
+# --- Logs ---
+logs/*
+!logs/.gitkeep
+
+# --- Output files ---
+output/*
+!output/.gitkeep
+
+# --- Imported business data (NEVER commit) ---
+import/*.xlsx
+import/ORDINI/*.xlsx
+
+# --- Temporary / backup files ---
+*.tmp
+*.bak
+*.old
+~$*.xlsx
+
+# --- OS ---
+.DS_Store
+Thumbs.db
