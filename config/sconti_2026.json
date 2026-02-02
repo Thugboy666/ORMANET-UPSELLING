@@ -1,0 +1,42 @@
+{
+  "BATTERIE": {
+    "RIV+10": {"discount": 8.0, "ric": 17.0},
+    "RIV": {"discount": 3.0, "ric": 13.5},
+    "DIST": {"discount": 1.5, "ric": 11.0}
+  },
+  "CANCELLERIA": {
+    "RIV+10": {"discount": 10.0, "ric": 25.0},
+    "RIV": {"discount": 7.0, "ric": 18.0},
+    "DIST": {"discount": 3.0, "ric": 12.0}
+  },
+  "REMAN": {
+    "RIV+10": {"discount": 10.0, "ric": 25.0},
+    "RIV": {"discount": 7.0, "ric": 18.0},
+    "DIST": {"discount": 3.0, "ric": 12.0}
+  },
+  "ORIGINALI": {
+    "RIV+10": {"discount": 8.0, "ric": 17.0},
+    "RIV": {"discount": 3.0, "ric": 13.5},
+    "DIST": {"discount": 1.0, "ric": 11.0}
+  },
+  "STORAGE": {
+    "RIV+10": {"discount": 8.0, "ric": 17.0},
+    "RIV": {"discount": 3.0, "ric": 13.5},
+    "DIST": {"discount": 1.0, "ric": 11.0}
+  },
+  "ROTOLI TERMICI": {
+    "RIV+10": {"discount": 8.0, "ric": 17.0},
+    "RIV": {"discount": 7.0, "ric": 13.0},
+    "DIST": {"discount": 0.0, "ric": 10.0}
+  },
+  "CARTA": {
+    "RIV+10": {"discount": 2.0, "ric": 18.0},
+    "RIV": {"discount": 2.0, "ric": 13.0},
+    "DIST": {"discount": 0.0, "ric": 10.0}
+  },
+  "TIMBRI": {
+    "RIV+10": {"discount": 3.0, "ric": 15.0},
+    "RIV": {"discount": 2.0, "ric": 13.0},
+    "DIST": {"discount": 0.0, "ric": 10.0}
+  }
+}
