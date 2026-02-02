@@ -10,6 +10,8 @@ __pycache__/
 # --- Runtime (Python embedded, exe, dll) ---
 runtime/*
 !runtime/.gitkeep
+!runtime/git/
+!runtime/git/.gitkeep
 !runtime/python310/.gitkeep
 
 # --- Local environment ---
