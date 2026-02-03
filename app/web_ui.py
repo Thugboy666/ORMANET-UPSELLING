@@ -128,6 +128,77 @@ HTML = """
       .actions.inline {
         grid-template-columns: repeat(2, 1fr);
       }
+      .guide-steps {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 16px;
+        font-size: 12px;
+      }
+      .guide-steps li {
+        margin-bottom: 6px;
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+      .step-badge {
+        background: #ffe0c2;
+        color: #7a2d00;
+        font-weight: 700;
+        font-size: 11px;
+        border-radius: 999px;
+        padding: 2px 6px;
+      }
+      .banner {
+        padding: 10px 12px;
+        border-radius: 6px;
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      .banner.warning {
+        background: #fff4e0;
+        color: #7a2d00;
+        border: 1px solid #f0d6bf;
+      }
+      .banner.error {
+        background: #ffecec;
+        color: #9b0000;
+        border: 1px solid #f3c0c0;
+      }
+      .inline-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        margin-top: 6px;
+      }
+      .ric-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+      }
+      .ric-table th,
+      .ric-table td {
+        border-bottom: 1px solid #eee;
+        padding: 6px 8px;
+        font-size: 13px;
+      }
+      .ric-table th {
+        background: #fffaf5;
+      }
+      .ric-table input {
+        width: 100%;
+        padding: 6px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+      }
+      .ric-help {
+        font-size: 13px;
+        color: #444;
+        margin-bottom: 10px;
+      }
+      .ric-help strong {
+        color: #7a2d00;
+      }
       .mapping-button {
         margin-top: 12px;
       }
@@ -323,8 +394,18 @@ HTML = """
       <div class="panel">
         <h3>Stato</h3>
         <ul class="status-list" id="statusList"></ul>
+        <h4>Guida rapida</h4>
+        <ul class="guide-steps">
+          <li><span class="step-badge">1</span>Carica clienti/stock/ordini</li>
+          <li><span class="step-badge">2</span>Seleziona cliente, ordine, 4 storici</li>
+          <li><span class="step-badge">3</span>Controlla margini (RIC) se necessario</li>
+          <li><span class="step-badge">4</span>Imposta aggressività / sconto</li>
+          <li><span class="step-badge">5</span>Verifica righe (note clamp) e modifica se serve</li>
+          <li><span class="step-badge">6</span>Esporta</li>
+        </ul>
         <div class="actions">
           <button id="loadDefaults">Carica default</button>
+          <button id="ricParamsBtn" class="secondary">Parametri margini (RIC)</button>
         </div>
         <label>Cliente</label>
         <select id="clientSelect"></select>
@@ -358,7 +439,9 @@ HTML = """
         <h3>Preventivo (Quote)</h3>
         <div class="controls">
           <div>
-            <label for="aggressivityRange">Aggressività (0-100)</label>
+            <label for="aggressivityRange" title="Aumenta lo sconto commerciale (entro i limiti di ric minimo).">
+              Aggressività (0-100)
+            </label>
             <div class="inline">
               <input type="range" id="aggressivityRange" min="0" max="100" value="0" />
               <span class="value" id="aggressivityValue">0</span>
@@ -380,14 +463,23 @@ HTML = """
           </div>
           <div>
             <label for="bufferRic">Buffer ric (%)</label>
-            <input type="number" id="bufferRic" min="0" step="0.1" value="2" />
+            <input type="number" id="bufferRic" min="0" step="0.1" value="2" readonly />
+            <label class="inline-toggle">
+              <input type="checkbox" id="bufferRicOverrideToggle" />
+              Override avanzato
+            </label>
           </div>
           <div>
-            <label for="maxDiscount">Max sconto (%)</label>
+            <label for="maxDiscount" title="Cap massimo aggiuntivo, non può superare il max reale calcolato.">
+              Max sconto (%)
+            </label>
             <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
+            <div class="info" id="maxDiscountHint"></div>
           </div>
           <div>
-            <label for="roundingMode">Arrotondamento</label>
+            <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
+              Arrotondamento
+            </label>
             <select id="roundingMode">
               <option value="NONE">NONE</option>
               <option value="0.01">0.01</option>
@@ -406,6 +498,8 @@ HTML = """
             </label>
           </div>
         </div>
+        <div class="banner warning" id="clampBanner" style="display:none"></div>
+        <div class="banner error" id="ricOverrideBanner" style="display:none"></div>
         <div class="table-wrapper">
           <table>
             <thead>
@@ -416,7 +510,8 @@ HTML = """
                 <th>Qty</th>
                 <th>LM</th>
                 <th>Sconto fisso (SCONTI2026)</th>
-                <th>Prezzo base cliente</th>
+                <th>Prezzo baseline (RIC.BASE)</th>
+                <th>Prezzo minimo (RIC.)</th>
                 <th>Sconto commerciale</th>
                 <th>Prezzo finale</th>
                 <th>Ric % finale</th>
@@ -459,6 +554,49 @@ HTML = """
         </div>
       </div>
     </div>
+    <div class="modal" id="ricModal" aria-hidden="true">
+      <div class="modal-content">
+        <div class="modal-header">
+          <strong>Parametri margini (RIC)</strong>
+          <button id="closeRic" class="secondary">Chiudi</button>
+        </div>
+        <div class="modal-body">
+          <div class="ric-help">
+            <p><strong>RIC.BASE</strong>: È il ricarico di partenza: da qui parte il prezzo “standard” prima dello sconto commerciale. Più alto = più spazio per scontare senza scendere sotto il minimo.</p>
+            <p><strong>RIC (minimo)</strong>: È il ricarico minimo accettabile: sotto questo valore NON si può scendere. È il pavimento anti-perdita.</p>
+            <p><strong>Relazione</strong>: Lo sconto commerciale può muoversi solo tra RIC.BASE e RIC.</p>
+            <p id="ricExample" class="info"></p>
+          </div>
+          <label class="inline-toggle">
+            <input type="checkbox" id="ricOverrideToggle" />
+            Override manuale (avanzato)
+          </label>
+          <label for="ricCategorySelect">Categoria per reset</label>
+          <select id="ricCategorySelect"></select>
+          <div class="error" id="ricModalError"></div>
+          <table class="ric-table">
+            <thead>
+              <tr>
+                <th>Categoria</th>
+                <th>Listino</th>
+                <th>RIC.BASE</th>
+                <th>RIC</th>
+                <th>Note</th>
+                <th>Reset</th>
+              </tr>
+            </thead>
+            <tbody id="ricTableBody"></tbody>
+          </table>
+          <div class="actions inline">
+            <button id="saveRicOverrides">Salva override</button>
+            <button id="resetRicCategory" class="secondary">Reset override categoria</button>
+          </div>
+          <div class="actions">
+            <button id="resetRicAll" class="secondary">Reset tutto (torna a SCONTI 2026)</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <script>
       const statusList = document.getElementById("statusList");
       const clientSelect = document.getElementById("clientSelect");
@@ -475,6 +613,8 @@ HTML = """
       const resultsBody = document.getElementById("resultsBody");
       const validationBox = document.getElementById("validationBox");
       const warningBox = document.getElementById("warningBox");
+      const clampBanner = document.getElementById("clampBanner");
+      const ricOverrideBanner = document.getElementById("ricOverrideBanner");
       const mappingBtn = document.getElementById("mappingBtn");
       const mappingModal = document.getElementById("mappingModal");
       const closeMapping = document.getElementById("closeMapping");
@@ -491,7 +631,9 @@ HTML = """
       const aggressivityValue = document.getElementById("aggressivityValue");
       const aggressivityMode = document.getElementById("aggressivityMode");
       const bufferRic = document.getElementById("bufferRic");
+      const bufferRicOverrideToggle = document.getElementById("bufferRicOverrideToggle");
       const maxDiscount = document.getElementById("maxDiscount");
+      const maxDiscountHint = document.getElementById("maxDiscountHint");
       const roundingMode = document.getElementById("roundingMode");
       const recalcBtn = document.getElementById("recalcBtn");
       const resetOverridesBtn = document.getElementById("resetOverridesBtn");
@@ -500,9 +642,25 @@ HTML = """
       const tracePanel = document.querySelector(".trace-panel");
       const traceSummary = document.getElementById("traceSummary");
       const traceRows = document.getElementById("traceRows");
+      const ricParamsBtn = document.getElementById("ricParamsBtn");
+      const ricModal = document.getElementById("ricModal");
+      const closeRic = document.getElementById("closeRic");
+      const ricOverrideToggle = document.getElementById("ricOverrideToggle");
+      const ricTableBody = document.getElementById("ricTableBody");
+      const ricExample = document.getElementById("ricExample");
+      const ricModalError = document.getElementById("ricModalError");
+      const saveRicOverrides = document.getElementById("saveRicOverrides");
+      const resetRicCategory = document.getElementById("resetRicCategory");
+      const resetRicAll = document.getElementById("resetRicAll");
+      const ricCategorySelect = document.getElementById("ricCategorySelect");
       let copyBlock = "";
       let mappingData = {};
       let activeMappingTab = "ORDINI";
+      let pricingLimits = {
+        max_discount_real_min: null,
+        max_discount_real_max: null,
+        buffer_ric_example: null
+      };
       let globalParams = {
         aggressivity: 0,
         aggressivity_mode: "discount_from_baseline",
@@ -514,6 +672,8 @@ HTML = """
       let perRowOverrides = {};
       let lastValidation = { ok: true, errors: [] };
       let lastQuoteRows = [];
+      let ricRows = [];
+      let ricOverrideEnabled = false;
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -536,6 +696,20 @@ HTML = """
 
       function setWarning(message) {
         warningBox.textContent = message || "";
+      }
+
+      function setClampBanner(message) {
+        clampBanner.textContent = message || "";
+        clampBanner.style.display = message ? "block" : "none";
+      }
+
+      function setRicOverrideBanner(message) {
+        ricOverrideBanner.textContent = message || "";
+        ricOverrideBanner.style.display = message ? "block" : "none";
+      }
+
+      function setRicModalError(message) {
+        ricModalError.textContent = message || "";
       }
 
       async function api(path, payload) {
@@ -575,6 +749,16 @@ HTML = """
       function closeMappingModal() {
         mappingModal.classList.remove("active");
         mappingModal.setAttribute("aria-hidden", "true");
+      }
+
+      function openRicModal() {
+        ricModal.classList.add("active");
+        ricModal.setAttribute("aria-hidden", "false");
+      }
+
+      function closeRicModal() {
+        ricModal.classList.remove("active");
+        ricModal.setAttribute("aria-hidden", "true");
       }
 
       function renderMappingTabs() {
@@ -686,6 +870,121 @@ HTML = """
         return html;
       }
 
+      function renderRicCategorySelect() {
+        const categories = [...new Set(ricRows.map((row) => row.categoria))].sort();
+        ricCategorySelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Seleziona categoria";
+        ricCategorySelect.appendChild(placeholder);
+        categories.forEach((category) => {
+          const opt = document.createElement("option");
+          opt.value = category;
+          opt.textContent = category;
+          ricCategorySelect.appendChild(opt);
+        });
+      }
+
+      function renderRicTable() {
+        ricTableBody.innerHTML = "";
+        ricRows.forEach((row, index) => {
+          const tr = document.createElement("tr");
+          const cells = [
+            row.categoria,
+            row.listino
+          ];
+          cells.forEach((value) => {
+            const td = document.createElement("td");
+            td.textContent = value ?? "";
+            tr.appendChild(td);
+          });
+
+          const baseCell = document.createElement("td");
+          const baseInput = document.createElement("input");
+          baseInput.type = "number";
+          baseInput.step = "0.1";
+          baseInput.value = Number(row.ric_base).toFixed(2);
+          baseInput.min = Number(row.ric_floor).toFixed(2);
+          baseInput.disabled = !ricOverrideEnabled;
+          baseInput.addEventListener("change", () => {
+            ricRows[index].ric_base = Number(baseInput.value);
+          });
+          baseCell.appendChild(baseInput);
+          tr.appendChild(baseCell);
+
+          const floorCell = document.createElement("td");
+          const floorInput = document.createElement("input");
+          floorInput.type = "number";
+          floorInput.step = "0.1";
+          floorInput.value = Number(row.ric_floor).toFixed(2);
+          floorInput.min = Number(row.ric_floor_min).toFixed(2);
+          floorInput.disabled = !ricOverrideEnabled;
+          floorInput.addEventListener("change", () => {
+            ricRows[index].ric_floor = Number(floorInput.value);
+          });
+          floorCell.appendChild(floorInput);
+          tr.appendChild(floorCell);
+
+          const noteCell = document.createElement("td");
+          const noteInput = document.createElement("input");
+          noteInput.type = "text";
+          noteInput.value = row.note || "";
+          noteInput.disabled = !ricOverrideEnabled;
+          noteInput.addEventListener("change", () => {
+            ricRows[index].note = noteInput.value;
+          });
+          noteCell.appendChild(noteInput);
+          const buffer = Number(row.ric_base) - Number(row.ric_floor);
+          if (buffer < 0.5) {
+            const warn = document.createElement("div");
+            warn.className = "warning";
+            warn.textContent = "Spazio sconto quasi nullo";
+            noteCell.appendChild(warn);
+          }
+          tr.appendChild(noteCell);
+
+          const resetCell = document.createElement("td");
+          const resetBtn = document.createElement("button");
+          resetBtn.type = "button";
+          resetBtn.className = "secondary";
+          resetBtn.textContent = "Reset";
+          resetBtn.disabled = !ricOverrideEnabled || row.source !== "override";
+          resetBtn.addEventListener("click", async () => {
+            setRicModalError("");
+            const res = await api("/api/ric/reset_overrides", {
+              categoria: row.categoria,
+              listino: row.listino
+            });
+            if (!res.ok) {
+              setRicModalError(res.error || "Errore reset override");
+              return;
+            }
+            await loadRicOverrides();
+          });
+          resetCell.appendChild(resetBtn);
+          tr.appendChild(resetCell);
+
+          ricTableBody.appendChild(tr);
+        });
+        saveRicOverrides.disabled = !ricOverrideEnabled;
+        resetRicCategory.disabled = !ricOverrideEnabled;
+        resetRicAll.disabled = !ricOverrideEnabled;
+      }
+
+      async function loadRicOverrides() {
+        setRicModalError("");
+        const res = await api("/api/ric/get_overrides");
+        if (!res.ok) {
+          setRicModalError(res.error || "Errore caricamento RIC");
+          return;
+        }
+        ricRows = res.rows || [];
+        ricExample.textContent = res.example || "";
+        ricOverrideEnabled = ricOverrideToggle.checked;
+        renderRicCategorySelect();
+        renderRicTable();
+      }
+
       function renderStatus(status) {
         statusList.innerHTML = "";
         const items = [
@@ -694,7 +993,8 @@ HTML = """
           [`Storici selezionati (${status.histories_selected_count}/4)`, status.histories_ok],
           ["Ordine upsell caricato", status.order_loaded],
           ["Causale selezionata", status.causale_set],
-          ["Cliente selezionato", status.client_selected]
+          ["Cliente selezionato", status.client_selected],
+          ["Override RIC validi", status.ric_overrides_ok]
         ];
         items.forEach(([label, ok]) => {
           const li = document.createElement("li");
@@ -704,9 +1004,17 @@ HTML = """
         });
         computeBtn.disabled = !status.ready_to_compute;
         copyBtn.disabled = !status.has_results;
-        exportBtn.disabled = !status.has_results || !lastValidation.ok;
+        exportBtn.disabled = !status.has_results || !lastValidation.ok || !status.ric_overrides_ok;
         recalcBtn.disabled = !status.has_results;
         resetOverridesBtn.disabled = !status.has_results;
+        if (!status.ric_overrides_ok) {
+          const details = (status.ric_override_errors || []).join(" | ");
+          setRicOverrideBanner(
+            details || "Override RIC non valide: correggi prima di esportare."
+          );
+        } else {
+          setRicOverrideBanner("");
+        }
       }
 
       function syncControls() {
@@ -719,6 +1027,25 @@ HTML = """
           globalParams.rounding === null || globalParams.rounding === undefined
             ? "NONE"
             : String(globalParams.rounding);
+      }
+
+      function updatePricingLimitsHint() {
+        if (pricingLimits.max_discount_real_min !== null && pricingLimits.max_discount_real_min !== undefined) {
+          const limit = Number(pricingLimits.max_discount_real_min);
+          maxDiscount.max = limit;
+          maxDiscountHint.textContent = `Max reale calcolato: ${limit.toFixed(2)}%`;
+          if (globalParams.max_discount_percent > limit) {
+            globalParams.max_discount_percent = limit;
+            maxDiscount.value = limit.toFixed(2);
+          }
+        } else {
+          maxDiscountHint.textContent = "";
+          maxDiscount.removeAttribute("max");
+        }
+        if (!bufferRicOverrideToggle.checked && pricingLimits.buffer_ric_example !== null) {
+          globalParams.buffer_ric = Number(pricingLimits.buffer_ric_example);
+          bufferRic.value = Number(pricingLimits.buffer_ric_example).toFixed(2);
+        }
       }
 
       function renderTable(rows, validation) {
@@ -788,6 +1115,10 @@ HTML = """
           basePriceCell.textContent = Number(row.customer_base_price).toFixed(2);
           tr.appendChild(basePriceCell);
 
+          const floorPriceCell = document.createElement("td");
+          floorPriceCell.textContent = Number(row.min_unit_price).toFixed(2);
+          tr.appendChild(floorPriceCell);
+
           const discountCell = document.createElement("td");
           const discountInput = document.createElement("input");
           discountInput.type = "number";
@@ -832,7 +1163,7 @@ HTML = """
 
           const noteCell = document.createElement("td");
           if (row.clamp_reason === "MIN_RIC_FLOOR") {
-            noteCell.textContent = `Sconto bloccato: ric minimo ${Number(row.required_ric).toFixed(2)}%`;
+            noteCell.textContent = `Sconto bloccato: ric minimo ${Number(row.required_ric).toFixed(2)}% (floor=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)}; max_sconto_reale=${Number(row.max_discount_real).toFixed(2)}%)`;
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
           } else {
@@ -856,8 +1187,8 @@ HTML = """
           ["Causale", global.causale || ""],
           ["Aggressività", pricing.aggressivity ?? ""],
           ["Modalità", pricing.aggressivity_mode ?? ""],
-          ["Max sconto", pricing.max_discount_percent ?? ""],
-          ["Buffer ric", pricing.buffer_ric ?? ""],
+          ["Max sconto (cap)", pricing.max_discount_percent ?? ""],
+          ["Buffer ric (info)", pricing.buffer_ric ?? ""],
           ["Arrotondamento", pricing.rounding ?? ""]
         ];
         summaryItems.forEach(([label, value]) => {
@@ -878,17 +1209,22 @@ HTML = """
             ["Selezione", row.selection_reason],
             ["LM", row.lm],
             ["Sconto fisso", row.fixed_discount_percent],
-            ["Prezzo base cliente", row.customer_base_price],
-            ["Ric richiesto", row.required_ric],
-            ["Prezzo minimo", row.min_final_price],
+            ["RIC.BASE", row.ric_base],
+            ["RIC minimo", row.ric_floor],
+            ["RIC source", row.ric_source],
+            ["Prezzo baseline", row.baseline_price],
+            ["Prezzo minimo (RIC.)", row.floor_price],
+            ["Max sconto reale", row.max_discount_real],
+            ["Max sconto effettivo", row.max_discount_effective],
             ["Buffer ric", row.buffer_ric],
             ["Aggressività", row.aggressivity],
             ["Modalità", row.aggressivity_mode],
-            ["Max sconto", row.max_discount_percent],
+            ["Max sconto (cap)", row.max_discount_percent],
             ["Sconto override", row.discount_override],
             ["Prezzo override", row.unit_price_override],
             ["Sconto desiderato", row.desired_discount_percent],
             ["Sconto applicato", row.applied_discount_percent],
+            ["Prezzo candidato", row.candidate_price],
             ["Clamp reason", row.clamp_reason],
             ["Prezzo finale", row.final_price],
             ["Ric finale", row.final_ric_percent],
@@ -948,6 +1284,7 @@ HTML = """
             rounding: status.pricing.rounding ?? globalParams.rounding
           };
           syncControls();
+          bufferRic.readOnly = !bufferRicOverrideToggle.checked;
         }
       }
 
@@ -982,15 +1319,30 @@ HTML = """
         }
         copyBlock = res.copy_block || copyBlock;
         lastValidation = res.validation || { ok: true, errors: [] };
+        pricingLimits = res.pricing_limits || pricingLimits;
         const validationErrors = (lastValidation.errors || [])
           .map((err) => `${err.sku}: minimo ${Number(err.min_unit_price).toFixed(2)}`)
           .join(" | ");
         setValidation(lastValidation.ok ? "" : `Errore ric minimo: ${validationErrors}`);
         const warnings = (res.warnings || []).join(" | ");
         setWarning(warnings);
+        const hasClamp = (res.quote || []).some((row) => row.clamp_reason === "MIN_RIC_FLOOR");
+        if (hasClamp) {
+          const maxDiscountReal = pricingLimits.max_discount_real_min;
+          setClampBanner(
+            `Alcune righe sono al pavimento ric minimo (max sconto reale ${maxDiscountReal?.toFixed?.(2) ?? "-" }%).`
+          );
+        } else {
+          setClampBanner("");
+        }
         renderTable(res.quote, lastValidation);
         renderTrace(res.trace || {});
-        exportBtn.disabled = !lastValidation.ok;
+        if (res.ric_override_errors && res.ric_override_errors.length) {
+          setRicOverrideBanner(res.ric_override_errors.join(" | "));
+        }
+        const overrideInvalid = res.ric_override_errors && res.ric_override_errors.length;
+        exportBtn.disabled = !lastValidation.ok || overrideInvalid;
+        updatePricingLimitsHint();
       }
 
       async function recalcQuote() {
@@ -1090,12 +1442,23 @@ HTML = """
       });
 
       bufferRic.addEventListener("change", () => {
+        if (!bufferRicOverrideToggle.checked) {
+          return;
+        }
         globalParams.buffer_ric = Number(bufferRic.value);
         scheduleRecalc();
       });
 
       maxDiscount.addEventListener("change", () => {
-        globalParams.max_discount_percent = Number(maxDiscount.value);
+        let value = Number(maxDiscount.value);
+        if (maxDiscount.max) {
+          const maxAllowed = Number(maxDiscount.max);
+          if (value > maxAllowed) {
+            value = maxAllowed;
+            maxDiscount.value = maxAllowed.toFixed(2);
+          }
+        }
+        globalParams.max_discount_percent = value;
         scheduleRecalc();
       });
 
@@ -1112,6 +1475,13 @@ HTML = """
         const value = roundingMode.value;
         globalParams.rounding = value === "NONE" ? null : Number(value);
         scheduleRecalc();
+      });
+
+      bufferRicOverrideToggle.addEventListener("change", () => {
+        bufferRic.readOnly = !bufferRicOverrideToggle.checked;
+        if (!bufferRicOverrideToggle.checked) {
+          updatePricingLimitsHint();
+        }
       });
 
       copyBtn.addEventListener("click", async () => {
@@ -1160,6 +1530,74 @@ HTML = """
 
       closeMapping.addEventListener("click", () => {
         closeMappingModal();
+      });
+
+      ricParamsBtn.addEventListener("click", async () => {
+        ricOverrideToggle.checked = false;
+        ricOverrideEnabled = false;
+        await loadRicOverrides();
+        renderRicTable();
+        openRicModal();
+      });
+
+      closeRic.addEventListener("click", () => {
+        closeRicModal();
+      });
+
+      ricOverrideToggle.addEventListener("change", () => {
+        ricOverrideEnabled = ricOverrideToggle.checked;
+        renderRicTable();
+      });
+
+      saveRicOverrides.addEventListener("click", async () => {
+        if (!ricOverrideEnabled) {
+          setRicModalError("Attiva l'override manuale per modificare i valori.");
+          return;
+        }
+        const overridesToSave = ricRows
+          .filter((row) => {
+            const baseChanged = Number(row.ric_base) !== Number(row.ric_base_default);
+            const floorChanged = Number(row.ric_floor) !== Number(row.ric_floor_default);
+            const noteChanged = (row.note || "") !== (row.note_default || "");
+            return baseChanged || floorChanged || noteChanged;
+          })
+          .map((row) => ({
+            categoria: row.categoria,
+            listino: row.listino,
+            ric_base: row.ric_base,
+            ric_floor: row.ric_floor,
+            note: row.note || ""
+          }));
+        const res = await api("/api/ric/save_overrides", { overrides: overridesToSave });
+        if (!res.ok) {
+          setRicModalError((res.details || []).join(" | ") || res.error || "Errore salvataggio override");
+          return;
+        }
+        await loadRicOverrides();
+        setRicModalError("");
+      });
+
+      resetRicCategory.addEventListener("click", async () => {
+        const category = ricCategorySelect.value;
+        if (!category) {
+          setRicModalError("Seleziona una categoria da resettare.");
+          return;
+        }
+        const res = await api("/api/ric/reset_overrides", { categoria: category });
+        if (!res.ok) {
+          setRicModalError(res.error || "Errore reset categoria");
+          return;
+        }
+        await loadRicOverrides();
+      });
+
+      resetRicAll.addEventListener("click", async () => {
+        const res = await api("/api/ric/reset_overrides", {});
+        if (!res.ok) {
+          setRicModalError(res.error || "Errore reset totale");
+          return;
+        }
+        await loadRicOverrides();
       });
 
       saveMappingBtn.addEventListener("click", async () => {
