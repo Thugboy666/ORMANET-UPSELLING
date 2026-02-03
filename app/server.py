@@ -14,14 +14,21 @@ from pathlib import Path
 from typing import Any
 
 from app.engine import (
-    AGGRESSIVITA_STEPS,
     CAUSALI,
     ClientInfo,
+    DEFAULT_AGGRESSIVITY,
+    DEFAULT_BUFFER_RIC,
+    DEFAULT_MAX_DISCOUNT,
+    DEFAULT_ROUNDING,
+    PricingParams,
     SessionLogger,
     UpsellRow,
     compute_upsell,
     export_excel,
+    get_required_ric,
     load_json,
+    map_macro_category,
+    pick_listino_value,
 )
 from app.io_loaders import (
     DEFAULT_FIELD_MAPPING,
@@ -56,14 +63,22 @@ class AppState:
     histories: list[Path] = field(default_factory=list)
     current_order: Path | None = None
     causale: str | None = None
-    aggressivita: int = 0
     selected_client_id: str | None = None
     upsell_rows: list[UpsellRow] = field(default_factory=list)
+    pricing: PricingParams = field(default_factory=PricingParams)
+    per_row_overrides: dict[str, dict] = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+    validation: dict = field(default_factory=lambda: {"ok": True, "errors": []})
+    warnings: list[str] = field(default_factory=list)
     copy_block: str = ""
 
     def reset_results(self) -> None:
         self.upsell_rows = []
         self.copy_block = ""
+        self.trace = {}
+        self.validation = {"ok": True, "errors": []}
+        self.warnings = []
+        self.per_row_overrides = {}
 
     def ready_to_compute(self) -> bool:
         return (
@@ -136,10 +151,33 @@ def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str,
     for row in rows:
         lines.append(
             f"- {row.codice} | {row.descrizione} | {row.qty} | {row.prezzo_unit:.2f} | "
-            f"Ric% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
-            f"Disponibile dal {row.disponibile_dal or '-'}"
+            f"Sconto% {row.applied_discount_percent:.2f} | Ric% {row.final_ric_percent:.2f} | "
+            f"Ric min% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
+            f"Disponibile dal {row.disponibile_dal or '-'} | Note {row.clamp_reason or '-'}"
         )
     return "\n".join(lines)
+
+
+def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
+    return [
+        {
+            "codice": row.codice,
+            "descrizione": row.descrizione,
+            "qty": row.qty,
+            "prezzo_unit": row.prezzo_unit,
+            "listino_value": row.listino_value,
+            "baseline_price": row.baseline_price,
+            "applied_discount_percent": row.applied_discount_percent,
+            "final_ric_percent": row.final_ric_percent,
+            "required_ric": row.required_ric,
+            "totale": row.totale,
+            "disp": row.disp,
+            "disponibile_dal": row.disponibile_dal or "",
+            "clamp_reason": row.clamp_reason,
+            "min_unit_price": row.min_unit_price,
+        }
+        for row in rows
+    ]
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -203,7 +241,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "selected_order": STATE.current_order.name if STATE.current_order else "",
                     "selected_histories": histories_selected,
                     "causale": STATE.causale or "",
-                    "aggressivita": STATE.aggressivita,
+                    "pricing": {
+                        "aggressivity": STATE.pricing.aggressivity,
+                        "aggressivity_mode": STATE.pricing.aggressivity_mode,
+                        "max_discount_percent": STATE.pricing.max_discount_percent,
+                        "buffer_ric": STATE.pricing.buffer_ric,
+                        "rounding": STATE.pricing.rounding,
+                    },
+                    "validation_ok": STATE.validation.get("ok", True),
                 }
             )
             return
@@ -344,9 +389,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/api/set_aggressivita":
             aggressivita = payload.get("aggressivita", 0)
-            if aggressivita in AGGRESSIVITA_STEPS:
-                STATE.aggressivita = aggressivita
+            try:
+                STATE.pricing.aggressivity = float(aggressivita)
                 STATE.reset_results()
+            except (TypeError, ValueError):
+                pass
             self._send_json({"success": True})
             return
 
@@ -372,35 +419,48 @@ class RequestHandler(BaseHTTPRequestHandler):
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
-                STATE.upsell_rows = compute_upsell(
+                STATE.per_row_overrides = {}
+                STATE.pricing = PricingParams(
+                    aggressivity=DEFAULT_AGGRESSIVITY,
+                    aggressivity_mode="discount_from_baseline",
+                    max_discount_percent=DEFAULT_MAX_DISCOUNT,
+                    buffer_ric=DEFAULT_BUFFER_RIC,
+                    rounding=DEFAULT_ROUNDING,
+                )
+                STATE.upsell_rows, STATE.trace, STATE.validation, STATE.warnings = compute_upsell(
                     current_items=current_items,
                     historical_items=historical_items,
                     stock=STATE.stock,
                     client=client,
                     sconti=sconti,
                     category_map=category_map,
-                    aggressivita=STATE.aggressivita,
+                    pricing=STATE.pricing,
                     causale=STATE.causale or CAUSALI[0],
                     logger=STATE.logger,
+                    overrides=STATE.per_row_overrides,
                 )
                 order_name = STATE.current_order.name if STATE.current_order else ""
                 STATE.copy_block = build_copy_block(
                     STATE.upsell_rows, client, order_name, STATE.causale or ""
                 )
-                rows = [
+                self._send_json(
                     {
-                        "codice": row.codice,
-                        "descrizione": row.descrizione,
-                        "qty": f"{row.qty:.2f}",
-                        "prezzo_unit": f"{row.prezzo_unit:.2f}",
-                        "required_ric": f"{row.required_ric:.2f}",
-                        "totale": f"{row.totale:.2f}",
-                        "disp": f"{row.disp:.2f}",
-                        "disponibile_dal": row.disponibile_dal or "",
+                        "ok": True,
+                        "success": True,
+                        "quote": serialize_rows(STATE.upsell_rows),
+                        "trace": STATE.trace,
+                        "warnings": STATE.warnings,
+                        "validation": STATE.validation,
+                        "copy_block": STATE.copy_block,
+                        "pricing": {
+                            "aggressivity": STATE.pricing.aggressivity,
+                            "aggressivity_mode": STATE.pricing.aggressivity_mode,
+                            "max_discount_percent": STATE.pricing.max_discount_percent,
+                            "buffer_ric": STATE.pricing.buffer_ric,
+                            "rounding": STATE.pricing.rounding,
+                        },
                     }
-                    for row in STATE.upsell_rows
-                ]
-                self._send_json({"success": True, "rows": rows, "copy_block": STATE.copy_block})
+                )
             except (MappingError, DataError) as exc:
                 STATE.logger.error("Errore mapping", error_type="mapping_error", details=exc.details)
                 self._send_json(
@@ -420,10 +480,142 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             return
 
+        if self.path == "/api/recalc":
+            if not STATE.ready_to_compute():
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Completa clienti, stock, 4 storici, ordine upsell, causale e cliente.",
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                global_params = payload.get("global_params", {})
+                overrides = payload.get("per_row_overrides", {})
+                if isinstance(global_params, dict):
+                    rounding_value = global_params.get("rounding", STATE.pricing.rounding)
+                    if rounding_value in ("NONE", "", None):
+                        rounding_value = None
+                    else:
+                        rounding_value = float(rounding_value)
+                    STATE.pricing = PricingParams(
+                        aggressivity=float(global_params.get("aggressivity", STATE.pricing.aggressivity)),
+                        aggressivity_mode=global_params.get(
+                            "aggressivity_mode", STATE.pricing.aggressivity_mode
+                        ),
+                        max_discount_percent=float(
+                            global_params.get("max_discount_percent", STATE.pricing.max_discount_percent)
+                        ),
+                        buffer_ric=float(global_params.get("buffer_ric", STATE.pricing.buffer_ric)),
+                        rounding=rounding_value,
+                    )
+                if isinstance(overrides, dict):
+                    STATE.per_row_overrides = overrides
+                sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+                category_map = load_json(CONFIG_DIR / "category_map.json")
+                historical_items = load_orders(
+                    STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
+                )
+                current_items = load_orders(
+                    [STATE.current_order], STATE.logger, STATE.field_mapping.get("ORDINI", {})
+                )
+                client = STATE.selected_client()
+                if client is None:
+                    raise ValueError("Cliente non selezionato")
+                STATE.upsell_rows, STATE.trace, STATE.validation, STATE.warnings = compute_upsell(
+                    current_items=current_items,
+                    historical_items=historical_items,
+                    stock=STATE.stock,
+                    client=client,
+                    sconti=sconti,
+                    category_map=category_map,
+                    pricing=STATE.pricing,
+                    causale=STATE.causale or CAUSALI[0],
+                    logger=STATE.logger,
+                    overrides=STATE.per_row_overrides,
+                )
+                order_name = STATE.current_order.name if STATE.current_order else ""
+                STATE.copy_block = build_copy_block(
+                    STATE.upsell_rows, client, order_name, STATE.causale or ""
+                )
+                self._send_json(
+                    {
+                        "ok": True,
+                        "quote": serialize_rows(STATE.upsell_rows),
+                        "trace": STATE.trace,
+                        "warnings": STATE.warnings,
+                        "validation": STATE.validation,
+                        "copy_block": STATE.copy_block,
+                    }
+                )
+            except Exception as exc:
+                STATE.logger.error("Errore recalcolo upsell", error=str(exc))
+                self._send_json(
+                    {"ok": False, "error": f"Errore recalcolo: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+
+        if self.path == "/api/min_price":
+            if not STATE.ready_to_compute():
+                self._send_json(
+                    {"ok": False, "error": "Dati non pronti."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            sku = payload.get("sku")
+            if not sku:
+                self._send_json(
+                    {"ok": False, "error": "SKU mancante."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            stock_item = STATE.stock.get(str(sku))
+            if not stock_item:
+                self._send_json(
+                    {"ok": False, "error": "SKU non trovato."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            try:
+                sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+                category_map = load_json(CONFIG_DIR / "category_map.json")
+                macro = map_macro_category(stock_item.categoria, category_map, STATE.logger)
+                if macro == "UNKNOWN":
+                    raise ValueError("Categoria non riconosciuta")
+                client = STATE.selected_client()
+                if client is None:
+                    raise ValueError("Cliente non selezionato")
+                required_ric = get_required_ric(macro, client.listino, sconti)
+                listino_value = pick_listino_value(stock_item, client.listino)
+                min_unit_price = listino_value * (1 + required_ric / 100)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "sku": sku,
+                        "min_unit_price": min_unit_price,
+                        "required_ric": required_ric,
+                        "listino_value": listino_value,
+                    }
+                )
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": f"Errore calcolo: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+
         if self.path == "/api/export":
             if not STATE.upsell_rows:
                 self._send_json(
                     {"success": False, "error": "Nessuna riga da esportare."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            if not STATE.validation.get("ok", True):
+                self._send_json(
+                    {"success": False, "error": "Correggi le righe con errore prima dell'export."},
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
