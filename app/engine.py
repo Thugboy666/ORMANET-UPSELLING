@@ -22,12 +22,11 @@ LISTINO_MAP = {
 }
 
 CAUSALI = ["DISPONIBILE", "IN ARRIVO", "PROGRAMMATO"]
-AGGRESSIVITA_STEPS = {
-    0: 0.0,
-    1: 2.0,
-    2: 4.0,
-    3: 6.0,
-}
+DEFAULT_AGGRESSIVITY = 0.0
+DEFAULT_BUFFER_RIC = 2.0
+DEFAULT_MAX_DISCOUNT = 10.0
+DEFAULT_ROUNDING = 0.01
+AGGRESSIVITY_MODES = ("discount_from_baseline", "target_ric_reduction")
 
 
 @dataclass
@@ -51,6 +50,8 @@ class StockItem:
     listino_ri10: float
     listino_ri: float
     listino_di: float
+    source_file: str | None = None
+    source_row: int | None = None
 
 
 @dataclass
@@ -61,6 +62,8 @@ class OrderItem:
     descrizione: str
     qty: float
     prezzo_unit: float
+    source_file: str | None = None
+    source_row: int | None = None
 
 
 @dataclass
@@ -69,10 +72,25 @@ class UpsellRow:
     descrizione: str
     qty: float
     prezzo_unit: float
+    listino_value: float
+    baseline_price: float
+    applied_discount_percent: float
+    final_ric_percent: float
+    clamp_reason: str | None
+    min_unit_price: float
     required_ric: float
     totale: float
     disp: float
     disponibile_dal: str | None = None
+
+
+@dataclass
+class PricingParams:
+    aggressivity: float = DEFAULT_AGGRESSIVITY
+    aggressivity_mode: str = AGGRESSIVITY_MODES[0]
+    max_discount_percent: float = DEFAULT_MAX_DISCOUNT
+    buffer_ric: float = DEFAULT_BUFFER_RIC
+    rounding: float | None = DEFAULT_ROUNDING
 
 
 class SessionLogger:
@@ -133,6 +151,13 @@ def round_up(value: float, decimals: int = 2) -> float:
     return math.ceil(value * factor) / factor
 
 
+def round_up_to_step(value: float, step: float | None) -> float:
+    if step is None or step <= 0:
+        return value
+    factor = 1 / step
+    return math.ceil(value * factor) / factor
+
+
 def map_macro_category(raw_category: str, mapping: dict, logger: SessionLogger) -> str:
     normalized = normalize_text(raw_category)
     for macro, rules in mapping.items():
@@ -156,15 +181,13 @@ def map_macro_category(raw_category: str, mapping: dict, logger: SessionLogger) 
     return "UNKNOWN"
 
 
-def required_markup(macro: str, listino: str, sconti: dict) -> float:
+def get_required_ric(macro: str, listino: str, sconti: dict) -> float:
     listino_key = LISTINO_MAP.get(listino.upper().strip(), "RIV")
     ric = sconti.get(macro, {}).get(listino_key, {}).get("ric", ABSOLUTE_MIN_MARKUP)
     return max(ABSOLUTE_MIN_MARKUP, float(ric))
 
 
-def pick_price(item: OrderItem, stock: StockItem | None, listino: str) -> float:
-    if item.prezzo_unit:
-        return item.prezzo_unit
+def pick_listino_value(stock: StockItem | None, listino: str) -> float:
     if stock is None:
         return 0.0
     key = LISTINO_MAP.get(listino.upper().strip(), "RIV")
@@ -173,6 +196,67 @@ def pick_price(item: OrderItem, stock: StockItem | None, listino: str) -> float:
     if key == "DIST":
         return stock.listino_di
     return stock.listino_ri
+
+
+def compute_baseline_price(listino_value: float, required_ric: float, buffer_ric: float) -> float:
+    baseline_ric = max(required_ric, required_ric + buffer_ric)
+    return listino_value * (1 + baseline_ric / 100)
+
+
+def aggressivity_to_discount_percent(aggressivity: float) -> float:
+    return max(0.0, min(100.0, float(aggressivity)))
+
+
+def apply_aggressivity(
+    *,
+    listino_value: float,
+    required_ric: float,
+    aggressivity: float,
+    max_discount_percent: float,
+    buffer_ric: float,
+    mode: str,
+    rounding: float | None,
+    discount_override: float | None = None,
+) -> tuple[float, float, float, float, str | None, float]:
+    baseline_price = compute_baseline_price(listino_value, required_ric, buffer_ric)
+    baseline_ric = (baseline_price / listino_value - 1) * 100 if listino_value else 0.0
+    desired_discount = aggressivity_to_discount_percent(aggressivity)
+    if discount_override is not None:
+        desired_discount = float(discount_override)
+    capped_discount = min(desired_discount, max_discount_percent)
+    clamp_reason = None
+    if desired_discount > max_discount_percent:
+        clamp_reason = "MAX_DISCOUNT_CAP"
+
+    floor_price = listino_value * (1 + required_ric / 100)
+    final_price = baseline_price
+    if mode == "target_ric_reduction":
+        target_ric = max(required_ric, baseline_ric - capped_discount)
+        if target_ric == required_ric and capped_discount > 0:
+            clamp_reason = "MIN_RIC_FLOOR"
+        final_price = listino_value * (1 + target_ric / 100)
+    else:
+        candidate_price = baseline_price * (1 - capped_discount / 100)
+        if candidate_price < floor_price:
+            final_price = floor_price
+            if capped_discount > 0:
+                clamp_reason = "MIN_RIC_FLOOR"
+        else:
+            final_price = candidate_price
+
+    final_price = round_up_to_step(final_price, rounding)
+    final_ric = (final_price / listino_value - 1) * 100 if listino_value else 0.0
+    applied_discount = (
+        (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
+    )
+    return (
+        final_price,
+        final_ric,
+        applied_discount,
+        baseline_price,
+        clamp_reason,
+        floor_price,
+    )
 
 
 def is_available(stock_item: StockItem, causale: str) -> tuple[bool, str | None]:
@@ -194,15 +278,21 @@ def compute_upsell(
     client: ClientInfo,
     sconti: dict,
     category_map: dict,
-    aggressivita: int,
+    pricing: PricingParams,
     causale: str,
     logger: SessionLogger,
-) -> list[UpsellRow]:
+    overrides: dict[str, dict] | None = None,
+) -> tuple[list[UpsellRow], dict, dict, list[str]]:
     suggestions: list[UpsellRow] = []
-    historical_by_code = {item.codice: item for item in historical_items}
+    trace_rows: list[dict] = []
+    warnings: list[str] = []
+    overrides = overrides or {}
+    historical_by_code: dict[str, list[OrderItem]] = {}
+    for item in historical_items:
+        historical_by_code.setdefault(item.codice, []).append(item)
     current_by_code = {item.codice: item for item in current_items}
 
-    def add_suggestion(item: OrderItem) -> None:
+    def add_suggestion(item: OrderItem, reason: str) -> None:
         if item.codice in {row.codice for row in suggestions}:
             return
         stock_item = stock.get(item.codice)
@@ -214,17 +304,46 @@ def compute_upsell(
         macro = map_macro_category(item.categoria, category_map, logger)
         if macro == "UNKNOWN":
             raise ValueError(f"Categoria non riconosciuta: {item.categoria}")
-        required = required_markup(macro, client.listino, sconti)
-        base_price = pick_price(item, stock_item, client.listino)
-        if base_price <= 0:
+        required = get_required_ric(macro, client.listino, sconti)
+        listino_value = pick_listino_value(stock_item, client.listino)
+        if listino_value <= 0:
+            warnings.append(f"Listino mancante per {item.codice}")
             return
-        cost_est = base_price / (1 + required / 100)
-        max_discount = AGGRESSIVITA_STEPS.get(aggressivita, 0.0)
-        discounted_price = base_price * (1 - max_discount / 100)
-        min_price = cost_est * (1 + required / 100)
-        final_price = max(discounted_price, min_price)
-        final_price = round_up(final_price, 2)
-        qty = max(1.0, item.qty)
+        override = overrides.get(item.codice, {})
+        qty_override = override.get("qty")
+        qty = max(1.0, float(qty_override)) if qty_override is not None else max(1.0, item.qty)
+        discount_override = override.get("discount_override")
+        unit_price_override = override.get("unit_price_override")
+        clamp_reason = None
+
+        (
+            computed_price,
+            final_ric,
+            applied_discount,
+            baseline_price,
+            clamp_reason,
+            floor_price,
+        ) = apply_aggressivity(
+            listino_value=listino_value,
+            required_ric=required,
+            aggressivity=pricing.aggressivity,
+            max_discount_percent=pricing.max_discount_percent,
+            buffer_ric=pricing.buffer_ric,
+            mode=pricing.aggressivity_mode,
+            rounding=pricing.rounding,
+            discount_override=discount_override,
+        )
+
+        final_price = computed_price
+        if unit_price_override is not None:
+            final_price = float(unit_price_override)
+            final_ric = (final_price / listino_value - 1) * 100 if listino_value else 0.0
+            applied_discount = (
+                (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
+            )
+            if final_price < floor_price:
+                clamp_reason = "BELOW_MIN_PRICE"
+
         totale = round_up(final_price * qty, 2)
         suggestions.append(
             UpsellRow(
@@ -232,11 +351,52 @@ def compute_upsell(
                 descrizione=item.descrizione,
                 qty=qty,
                 prezzo_unit=final_price,
-                required_ric=round_up(required, 2),
+                listino_value=listino_value,
+                baseline_price=baseline_price,
+                applied_discount_percent=applied_discount,
+                final_ric_percent=final_ric,
+                clamp_reason=clamp_reason,
+                min_unit_price=floor_price,
+                required_ric=required,
                 totale=totale,
                 disp=stock_item.disp,
                 disponibile_dal=available_date,
             )
+        )
+        trace_rows.append(
+            {
+                "sku": item.codice,
+                "categoria": item.categoria,
+                "macro_categoria": macro,
+                "selection_reason": reason,
+                "available": available,
+                "available_date": available_date,
+                "listino_key": LISTINO_MAP.get(client.listino.upper().strip(), "RIV"),
+                "listino_value": listino_value,
+                "required_ric": required,
+                "baseline_price": baseline_price,
+                "buffer_ric": pricing.buffer_ric,
+                "aggressivity": pricing.aggressivity,
+                "aggressivity_mode": pricing.aggressivity_mode,
+                "max_discount_percent": pricing.max_discount_percent,
+                "discount_override": discount_override,
+                "unit_price_override": unit_price_override,
+                "applied_discount_percent": applied_discount,
+                "floor_price": floor_price,
+                "clamp_reason": clamp_reason,
+                "final_price": final_price,
+                "final_ric_percent": final_ric,
+                "qty": qty,
+                "stock_source": {
+                    "file": stock_item.source_file,
+                    "row": stock_item.source_row,
+                },
+                "order_source": {
+                    "file": item.source_file,
+                    "row": item.source_row,
+                },
+                "history_occurrences": len(historical_by_code.get(item.codice, [])),
+            }
         )
 
     color_tokens = ["CYAN", "MAGENTA", "YELLOW"]
@@ -245,7 +405,7 @@ def compute_upsell(
         if any(token in description for token in color_tokens):
             for hist_item in historical_items:
                 if hist_item.marca == item.marca and "BLACK" in normalize_text(hist_item.descrizione):
-                    add_suggestion(hist_item)
+                    add_suggestion(hist_item, "color_match_black")
                     break
 
     for item in current_items:
@@ -254,7 +414,7 @@ def compute_upsell(
         stock_item = stock.get(item.codice)
         if not stock_item or stock_item.disp <= item.qty:
             continue
-        add_suggestion(item)
+        add_suggestion(item, "current_stock_available")
 
     if len(suggestions) < 3:
         for hist_item in historical_items:
@@ -264,10 +424,40 @@ def compute_upsell(
                 continue
             if hist_item.codice not in historical_by_code:
                 continue
-            add_suggestion(hist_item)
+            add_suggestion(hist_item, "historical_fallback")
 
+    errors: list[dict] = []
+    for row in suggestions:
+        if row.prezzo_unit < row.min_unit_price:
+            errors.append(
+                {
+                    "sku": row.codice,
+                    "min_unit_price": row.min_unit_price,
+                    "provided_price": row.prezzo_unit,
+                    "required_ric": row.required_ric,
+                }
+            )
+
+    trace = {
+        "global": {
+            "client_id": client.client_id,
+            "ragione_sociale": client.ragione_sociale,
+            "listino": client.listino,
+            "listino_key": LISTINO_MAP.get(client.listino.upper().strip(), "RIV"),
+            "causale": causale,
+            "pricing": {
+                "aggressivity": pricing.aggressivity,
+                "aggressivity_mode": pricing.aggressivity_mode,
+                "max_discount_percent": pricing.max_discount_percent,
+                "buffer_ric": pricing.buffer_ric,
+                "rounding": pricing.rounding,
+            },
+        },
+        "rows": trace_rows,
+    }
     logger.info("Computed %s upsell rows", len(suggestions))
-    return suggestions[:3]
+    validation = {"ok": len(errors) == 0, "errors": errors}
+    return suggestions[:3], trace, validation, warnings
 
 
 def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, output_dir: Path) -> Path:
@@ -291,10 +481,15 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
         "Descrizione",
         "Qty",
         "Prezzo (ex VAT)",
+        "Listino base",
+        "Baseline prezzo",
+        "Sconto applicato %",
+        "Ric % finale",
         "Ric % richiesto",
         "Totale (ex VAT)",
         "Disp.",
         "Disponibile dal",
+        "Note",
     ])
     for row in rows:
         ws.append([
@@ -302,10 +497,15 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
             row.descrizione,
             row.qty,
             row.prezzo_unit,
+            row.listino_value,
+            row.baseline_price,
+            row.applied_discount_percent,
+            row.final_ric_percent,
             row.required_ric,
             row.totale,
             row.disp,
             row.disponibile_dal or "",
+            row.clamp_reason or "",
         ])
     output_path = output_dir / "preventivo.xlsx"
     wb.save(output_path)

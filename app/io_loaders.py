@@ -317,6 +317,8 @@ def load_stock(
                 row_index,
                 path.name,
             ),
+            source_file=path.name,
+            source_row=row_index,
         )
     logger.info("Loaded %s stock items", len(stock))
     return stock
@@ -353,6 +355,8 @@ def load_orders(
                         row_index,
                         path.name,
                     ),
+                    source_file=path.name,
+                    source_row=row_index,
                 )
             )
     logger.info("Loaded %s order items", len(items))
