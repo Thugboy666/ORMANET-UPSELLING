@@ -50,6 +50,7 @@ class StockItem:
     listino_ri10: float
     listino_ri: float
     listino_di: float
+    lm: float
     source_file: str | None = None
     source_row: int | None = None
 
@@ -62,6 +63,7 @@ class OrderItem:
     descrizione: str
     qty: float
     prezzo_unit: float
+    lm: float
     source_file: str | None = None
     source_row: int | None = None
 
@@ -72,8 +74,11 @@ class UpsellRow:
     descrizione: str
     qty: float
     prezzo_unit: float
-    listino_value: float
-    baseline_price: float
+    lm: float
+    macro_categoria: str
+    fixed_discount_percent: float
+    customer_base_price: float
+    desired_discount_percent: float
     applied_discount_percent: float
     final_ric_percent: float
     clamp_reason: str | None
@@ -187,6 +192,22 @@ def get_required_ric(macro: str, listino: str, sconti: dict) -> float:
     return max(ABSOLUTE_MIN_MARKUP, float(ric))
 
 
+def get_fixed_discount(macro: str, listino: str, sconti: dict) -> float:
+    listino_key = LISTINO_MAP.get(listino.upper().strip(), "RIV")
+    discount = sconti.get(macro, {}).get(listino_key, {}).get("discount", 0.0)
+    return float(discount)
+
+
+def resolve_lm(stock_item: StockItem | None, order_item: OrderItem | None) -> tuple[float, str | None]:
+    stock_lm = stock_item.lm if stock_item and stock_item.lm > 0 else 0.0
+    order_lm = order_item.lm if order_item and order_item.lm > 0 else 0.0
+    if stock_lm > 0:
+        return stock_lm, "stock"
+    if order_lm > 0:
+        return order_lm, "order"
+    return 0.0, None
+
+
 def pick_listino_value(stock: StockItem | None, listino: str) -> float:
     if stock is None:
         return 0.0
@@ -198,28 +219,20 @@ def pick_listino_value(stock: StockItem | None, listino: str) -> float:
     return stock.listino_ri
 
 
-def compute_baseline_price(listino_value: float, required_ric: float, buffer_ric: float) -> float:
-    baseline_ric = max(required_ric, required_ric + buffer_ric)
-    return listino_value * (1 + baseline_ric / 100)
-
-
 def aggressivity_to_discount_percent(aggressivity: float) -> float:
     return max(0.0, min(100.0, float(aggressivity)))
 
 
 def apply_aggressivity(
     *,
-    listino_value: float,
+    lm: float,
+    customer_base_price: float,
     required_ric: float,
     aggressivity: float,
     max_discount_percent: float,
-    buffer_ric: float,
-    mode: str,
     rounding: float | None,
     discount_override: float | None = None,
-) -> tuple[float, float, float, float, str | None, float]:
-    baseline_price = compute_baseline_price(listino_value, required_ric, buffer_ric)
-    baseline_ric = (baseline_price / listino_value - 1) * 100 if listino_value else 0.0
+) -> tuple[float, float, float, float, str | None, float, float, float]:
     desired_discount = aggressivity_to_discount_percent(aggressivity)
     if discount_override is not None:
         desired_discount = float(discount_override)
@@ -228,34 +241,31 @@ def apply_aggressivity(
     if desired_discount > max_discount_percent:
         clamp_reason = "MAX_DISCOUNT_CAP"
 
-    floor_price = listino_value * (1 + required_ric / 100)
-    final_price = baseline_price
-    if mode == "target_ric_reduction":
-        target_ric = max(required_ric, baseline_ric - capped_discount)
-        if target_ric == required_ric and capped_discount > 0:
+    floor_price = lm * (1 + required_ric / 100)
+    candidate_price = customer_base_price * (1 - capped_discount / 100)
+    if candidate_price < floor_price:
+        final_price = floor_price
+        if capped_discount > 0:
             clamp_reason = "MIN_RIC_FLOOR"
-        final_price = listino_value * (1 + target_ric / 100)
     else:
-        candidate_price = baseline_price * (1 - capped_discount / 100)
-        if candidate_price < floor_price:
-            final_price = floor_price
-            if capped_discount > 0:
-                clamp_reason = "MIN_RIC_FLOOR"
-        else:
-            final_price = candidate_price
+        final_price = candidate_price
 
     final_price = round_up_to_step(final_price, rounding)
-    final_ric = (final_price / listino_value - 1) * 100 if listino_value else 0.0
+    final_ric = (final_price / lm - 1) * 100 if lm else 0.0
     applied_discount = (
-        (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
+        (customer_base_price - final_price) / customer_base_price * 100
+        if customer_base_price
+        else 0.0
     )
     return (
         final_price,
         final_ric,
         applied_discount,
-        baseline_price,
         clamp_reason,
         floor_price,
+        desired_discount,
+        capped_discount,
+        customer_base_price,
     )
 
 
@@ -305,10 +315,12 @@ def compute_upsell(
         if macro == "UNKNOWN":
             raise ValueError(f"Categoria non riconosciuta: {item.categoria}")
         required = get_required_ric(macro, client.listino, sconti)
-        listino_value = pick_listino_value(stock_item, client.listino)
-        if listino_value <= 0:
-            warnings.append(f"Listino mancante per {item.codice}")
+        fixed_discount = get_fixed_discount(macro, client.listino, sconti)
+        lm_value, lm_source = resolve_lm(stock_item, item)
+        if lm_value <= 0:
+            warnings.append(f"LM mancante per SKU {item.codice}")
             return
+        customer_base_price = lm_value * (1 - fixed_discount / 100)
         override = overrides.get(item.codice, {})
         qty_override = override.get("qty")
         qty = max(1.0, float(qty_override)) if qty_override is not None else max(1.0, item.qty)
@@ -320,16 +332,17 @@ def compute_upsell(
             computed_price,
             final_ric,
             applied_discount,
-            baseline_price,
             clamp_reason,
             floor_price,
+            desired_discount,
+            capped_discount,
+            customer_base_price,
         ) = apply_aggressivity(
-            listino_value=listino_value,
+            lm=lm_value,
+            customer_base_price=customer_base_price,
             required_ric=required,
             aggressivity=pricing.aggressivity,
             max_discount_percent=pricing.max_discount_percent,
-            buffer_ric=pricing.buffer_ric,
-            mode=pricing.aggressivity_mode,
             rounding=pricing.rounding,
             discount_override=discount_override,
         )
@@ -337,12 +350,15 @@ def compute_upsell(
         final_price = computed_price
         if unit_price_override is not None:
             final_price = float(unit_price_override)
-            final_ric = (final_price / listino_value - 1) * 100 if listino_value else 0.0
-            applied_discount = (
-                (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
-            )
             if final_price < floor_price:
-                clamp_reason = "BELOW_MIN_PRICE"
+                final_price = floor_price
+                clamp_reason = "MIN_RIC_FLOOR"
+            final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
+            applied_discount = (
+                (customer_base_price - final_price) / customer_base_price * 100
+                if customer_base_price
+                else 0.0
+            )
 
         totale = round_up(final_price * qty, 2)
         suggestions.append(
@@ -351,8 +367,11 @@ def compute_upsell(
                 descrizione=item.descrizione,
                 qty=qty,
                 prezzo_unit=final_price,
-                listino_value=listino_value,
-                baseline_price=baseline_price,
+                lm=lm_value,
+                macro_categoria=macro,
+                fixed_discount_percent=fixed_discount,
+                customer_base_price=customer_base_price,
+                desired_discount_percent=desired_discount,
                 applied_discount_percent=applied_discount,
                 final_ric_percent=final_ric,
                 clamp_reason=clamp_reason,
@@ -372,17 +391,21 @@ def compute_upsell(
                 "available": available,
                 "available_date": available_date,
                 "listino_key": LISTINO_MAP.get(client.listino.upper().strip(), "RIV"),
-                "listino_value": listino_value,
+                "lm": lm_value,
+                "lm_source": lm_source,
+                "fixed_discount_percent": fixed_discount,
+                "customer_base_price": customer_base_price,
                 "required_ric": required,
-                "baseline_price": baseline_price,
+                "min_final_price": floor_price,
                 "buffer_ric": pricing.buffer_ric,
                 "aggressivity": pricing.aggressivity,
                 "aggressivity_mode": pricing.aggressivity_mode,
                 "max_discount_percent": pricing.max_discount_percent,
                 "discount_override": discount_override,
                 "unit_price_override": unit_price_override,
+                "desired_discount_percent": desired_discount,
+                "capped_discount_percent": capped_discount,
                 "applied_discount_percent": applied_discount,
-                "floor_price": floor_price,
                 "clamp_reason": clamp_reason,
                 "final_price": final_price,
                 "final_ric_percent": final_ric,
@@ -396,6 +419,12 @@ def compute_upsell(
                     "row": item.source_row,
                 },
                 "history_occurrences": len(historical_by_code.get(item.codice, [])),
+                "formula": (
+                    f"Prezzo base cliente = LM * (1 - {fixed_discount:.2f}%) = "
+                    f"{customer_base_price:.2f}; "
+                    f"Prezzo finale = max(Prezzo base cliente * (1 - {capped_discount:.2f}%), "
+                    f"LM * (1 + {required:.2f}%))"
+                ),
             }
         )
 
@@ -480,10 +509,11 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
         "Codice",
         "Descrizione",
         "Qty",
-        "Prezzo (ex VAT)",
-        "Listino base",
-        "Baseline prezzo",
-        "Sconto applicato %",
+        "LM",
+        "Sconto fisso (%)",
+        "Prezzo base cliente",
+        "Sconto commerciale (%)",
+        "Prezzo finale (ex VAT)",
         "Ric % finale",
         "Ric % richiesto",
         "Totale (ex VAT)",
@@ -496,10 +526,11 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
             row.codice,
             row.descrizione,
             row.qty,
+            row.lm,
+            row.fixed_discount_percent,
+            row.customer_base_price,
+            row.desired_discount_percent,
             row.prezzo_unit,
-            row.listino_value,
-            row.baseline_price,
-            row.applied_discount_percent,
             row.final_ric_percent,
             row.required_ric,
             row.totale,

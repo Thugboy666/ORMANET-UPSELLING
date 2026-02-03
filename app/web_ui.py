@@ -365,6 +365,13 @@ HTML = """
             </div>
           </div>
           <div>
+            <label for="priceMode">Modalità prezzo</label>
+            <select id="priceMode">
+              <option value="discount">Sconto %</option>
+              <option value="final_price">Prezzo finale</option>
+            </select>
+          </div>
+          <div>
             <label for="aggressivityMode">Modalità aggressività</label>
             <select id="aggressivityMode">
               <option value="discount_from_baseline">Sconto da baseline</option>
@@ -392,6 +399,12 @@ HTML = """
             <button id="recalcBtn">Ricalcola</button>
             <button id="resetOverridesBtn" class="secondary">Reset override</button>
           </div>
+          <div class="actions inline">
+            <label class="inline">
+              <input type="checkbox" id="toggleTrace" checked />
+              Mostra dettagli
+            </label>
+          </div>
         </div>
         <div class="table-wrapper">
           <table>
@@ -401,15 +414,13 @@ HTML = """
                 <th>Codice</th>
                 <th>Descrizione</th>
                 <th>Qty</th>
-                <th>Listino</th>
-                <th>Baseline</th>
-                <th>Sconto %</th>
-                <th>Prezzo unit (ex VAT)</th>
+                <th>LM</th>
+                <th>Sconto fisso (SCONTI2026)</th>
+                <th>Prezzo base cliente</th>
+                <th>Sconto commerciale</th>
+                <th>Prezzo finale</th>
                 <th>Ric % finale</th>
                 <th>Ric % minimo</th>
-                <th>Totale</th>
-                <th>Disp.</th>
-                <th>Disponibile dal</th>
                 <th>Note</th>
               </tr>
             </thead>
@@ -420,7 +431,7 @@ HTML = """
         <div class="warning" id="warningBox"></div>
         <div class="trace-panel">
           <details open>
-            <summary>Explain / Debug</summary>
+            <summary>Passaggi di calcolo</summary>
             <div id="traceSummary" class="trace-grid"></div>
             <div id="traceRows"></div>
           </details>
@@ -484,6 +495,9 @@ HTML = """
       const roundingMode = document.getElementById("roundingMode");
       const recalcBtn = document.getElementById("recalcBtn");
       const resetOverridesBtn = document.getElementById("resetOverridesBtn");
+      const priceMode = document.getElementById("priceMode");
+      const toggleTrace = document.getElementById("toggleTrace");
+      const tracePanel = document.querySelector(".trace-panel");
       const traceSummary = document.getElementById("traceSummary");
       const traceRows = document.getElementById("traceRows");
       let copyBlock = "";
@@ -496,8 +510,10 @@ HTML = """
         buffer_ric: 2,
         rounding: 0.01
       };
+      let currentPriceMode = "discount";
       let perRowOverrides = {};
       let lastValidation = { ok: true, errors: [] };
+      let lastQuoteRows = [];
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -707,6 +723,7 @@ HTML = """
 
       function renderTable(rows, validation) {
         resultsBody.innerHTML = "";
+        lastQuoteRows = rows || [];
         const errorSkus = new Set((validation?.errors || []).map((err) => err.sku));
         rows.forEach((row) => {
           const tr = document.createElement("tr");
@@ -759,20 +776,25 @@ HTML = """
           qtyCell.appendChild(qtyInput);
           tr.appendChild(qtyCell);
 
-          const listinoCell = document.createElement("td");
-          listinoCell.textContent = Number(row.listino_value).toFixed(2);
-          tr.appendChild(listinoCell);
+          const lmCell = document.createElement("td");
+          lmCell.textContent = Number(row.lm).toFixed(2);
+          tr.appendChild(lmCell);
 
-          const baselineCell = document.createElement("td");
-          baselineCell.textContent = Number(row.baseline_price).toFixed(2);
-          tr.appendChild(baselineCell);
+          const fixedDiscountCell = document.createElement("td");
+          fixedDiscountCell.textContent = Number(row.fixed_discount_percent).toFixed(2);
+          tr.appendChild(fixedDiscountCell);
+
+          const basePriceCell = document.createElement("td");
+          basePriceCell.textContent = Number(row.customer_base_price).toFixed(2);
+          tr.appendChild(basePriceCell);
 
           const discountCell = document.createElement("td");
           const discountInput = document.createElement("input");
           discountInput.type = "number";
           discountInput.step = "0.1";
           discountInput.min = "0";
-          discountInput.value = Number(row.applied_discount_percent).toFixed(2);
+          discountInput.value = Number(row.desired_discount_percent).toFixed(2);
+          discountInput.disabled = currentPriceMode !== "discount";
           discountInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.discount_override = Number(discountInput.value);
@@ -789,6 +811,7 @@ HTML = """
           priceInput.step = "0.01";
           priceInput.min = "0";
           priceInput.value = Number(row.prezzo_unit).toFixed(2);
+          priceInput.disabled = currentPriceMode !== "final_price";
           priceInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.unit_price_override = Number(priceInput.value);
@@ -807,23 +830,9 @@ HTML = """
           ricMinCell.textContent = Number(row.required_ric).toFixed(2);
           tr.appendChild(ricMinCell);
 
-          const totalCell = document.createElement("td");
-          totalCell.textContent = Number(row.totale).toFixed(2);
-          tr.appendChild(totalCell);
-
-          const dispCell = document.createElement("td");
-          dispCell.textContent = Number(row.disp).toFixed(2);
-          tr.appendChild(dispCell);
-
-          const availCell = document.createElement("td");
-          availCell.textContent = row.disponibile_dal || "";
-          tr.appendChild(availCell);
-
           const noteCell = document.createElement("td");
           if (row.clamp_reason === "MIN_RIC_FLOOR") {
             noteCell.textContent = `Sconto bloccato: ric minimo ${Number(row.required_ric).toFixed(2)}%`;
-          } else if (row.clamp_reason === "BELOW_MIN_PRICE") {
-            noteCell.textContent = `Prezzo sotto minimo ${Number(row.min_unit_price).toFixed(2)}`;
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
           } else {
@@ -867,21 +876,24 @@ HTML = """
           const fields = [
             ["Categoria", row.categoria],
             ["Selezione", row.selection_reason],
-            ["Listino", row.listino_value],
+            ["LM", row.lm],
+            ["Sconto fisso", row.fixed_discount_percent],
+            ["Prezzo base cliente", row.customer_base_price],
             ["Ric richiesto", row.required_ric],
-            ["Baseline", row.baseline_price],
+            ["Prezzo minimo", row.min_final_price],
             ["Buffer ric", row.buffer_ric],
             ["Aggressività", row.aggressivity],
             ["Modalità", row.aggressivity_mode],
             ["Max sconto", row.max_discount_percent],
             ["Sconto override", row.discount_override],
             ["Prezzo override", row.unit_price_override],
+            ["Sconto desiderato", row.desired_discount_percent],
             ["Sconto applicato", row.applied_discount_percent],
-            ["Floor price", row.floor_price],
             ["Clamp reason", row.clamp_reason],
             ["Prezzo finale", row.final_price],
             ["Ric finale", row.final_ric_percent],
             ["Qty", row.qty],
+            ["Formula", row.formula],
             ["Stock source", `${row.stock_source?.file || "-"}:${row.stock_source?.row || "-"}`],
             ["Order source", `${row.order_source?.file || "-"}:${row.order_source?.row || "-"}`],
             ["Occorrenze storico", row.history_occurrences]
@@ -1087,6 +1099,15 @@ HTML = """
         scheduleRecalc();
       });
 
+      priceMode.addEventListener("change", () => {
+        currentPriceMode = priceMode.value;
+        renderTable(lastQuoteRows, lastValidation);
+      });
+
+      toggleTrace.addEventListener("change", () => {
+        tracePanel.style.display = toggleTrace.checked ? "" : "none";
+      });
+
       roundingMode.addEventListener("change", () => {
         const value = roundingMode.value;
         globalParams.rounding = value === "NONE" ? null : Number(value);
@@ -1196,6 +1217,7 @@ HTML = """
       });
 
       refreshStatus();
+      tracePanel.style.display = toggleTrace.checked ? "" : "none";
     </script>
   </body>
 </html>

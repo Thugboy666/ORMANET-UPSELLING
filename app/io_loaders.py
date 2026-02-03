@@ -48,6 +48,7 @@ DEFAULT_FIELD_MAPPING: dict[str, dict[str, list[str]]] = {
         "listino_ri10": ["L-RI10", "Listino RI+10%", "Listino RI+10"],
         "listino_ri": ["L-RI", "Listino RI"],
         "listino_di": ["L-DI", "Listino DI"],
+        "lm": ["LM", "Listino madre", "Listino Madre"],
     },
     "STOCK": {
         "categoria": ["Categoria"],
@@ -66,6 +67,7 @@ DEFAULT_FIELD_MAPPING: dict[str, dict[str, list[str]]] = {
         "listino_ri10": ["Listino RI+10%", "Listino RI+10"],
         "listino_ri": ["Listino RI"],
         "listino_di": ["Listino DI"],
+        "lm": ["LM", "Listino madre", "Listino Madre"],
     },
     "CLIENTI": {
         "id": ["ID", "Codice", "Codice numerico", "Cod. Cliente"],
@@ -317,6 +319,7 @@ def load_stock(
                 row_index,
                 path.name,
             ),
+            lm=parse_float(get_cell(row, indices.get("lm"), 0), "lm", row_index, path.name),
             source_file=path.name,
             source_row=row_index,
         )
@@ -355,6 +358,7 @@ def load_orders(
                         row_index,
                         path.name,
                     ),
+                    lm=parse_float(get_cell(row, indices.get("lm"), 0), "lm", row_index, path.name),
                     source_file=path.name,
                     source_row=row_index,
                 )
