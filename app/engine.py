@@ -94,8 +94,8 @@ class UpsellRow:
     applied_discount_pct: float
     final_ric_percent: float
     clamp_reason: str | None
-    min_unit_price: float
-    required_ric: float
+    min_unit_price: float | None
+    required_ric: float | None
     totale: float
     disp: float
     disponibile_dal: str | None = None
@@ -642,15 +642,27 @@ def compute_upsell(
 
         final_price = computed_price
         note = None
+        min_unit_price = floor_price
+        required_ric = ric_floor
+        if alt_selected and not alt_available:
+            note = "ALT non disponibile"
         if alt_selected and alt_available and not lock_override:
             final_price = round_up_to_step(float(alt_price), pricing.rounding)
             applied_discount_pct = (
                 (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
             )
             applied_discount_pct = max(0.0, min(100.0, applied_discount_pct))
+            desired_discount_pct = applied_discount_pct
+            effective_discount_pct = applied_discount_pct
             final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
-            note = "ALT: prezzo promo"
+            clamp_reason = "ALT_LOCKED"
+            min_unit_price = None
+            required_ric = None
+            note = "ALT: prezzo promo fisso (non scontabile)"
         if unit_price_override is not None:
+            clamp_reason = None
+            min_unit_price = floor_price
+            required_ric = ric_floor
             final_price = float(unit_price_override)
             if final_price < floor_price:
                 final_price = floor_price
@@ -663,6 +675,7 @@ def compute_upsell(
             applied_discount_pct = (
                 (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
             )
+            note = None
 
         totale = round_up(final_price * qty, 2)
         suggestions.append(
@@ -690,8 +703,8 @@ def compute_upsell(
                 applied_discount_pct=applied_discount_pct,
                 final_ric_percent=final_ric,
                 clamp_reason=clamp_reason,
-                min_unit_price=floor_price,
-                required_ric=ric_floor,
+                min_unit_price=min_unit_price,
+                required_ric=required_ric,
                 totale=totale,
                 disp=stock_item.disp,
                 disponibile_dal=available_date,
@@ -798,7 +811,7 @@ def compute_upsell(
 
     errors: list[dict] = []
     for row in suggestions:
-        if row.prezzo_unit < row.min_unit_price:
+        if row.min_unit_price is not None and row.prezzo_unit < row.min_unit_price:
             errors.append(
                 {
                     "sku": row.codice,
