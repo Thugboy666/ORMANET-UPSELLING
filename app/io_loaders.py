@@ -68,7 +68,7 @@ DEFAULT_FIELD_MAPPING: dict[str, dict[str, list[str]]] = {
         "listino_ri": ["Listino RI"],
         "listino_di": ["Listino DI"],
         "lm": ["LM", "Listino madre", "Listino Madre"],
-        "prezzo_alt": ["PREZZO_ALT", "Prezzo Alt", "Prezzo ALT"],
+        "prezzo_alt": ["PREZZO_ALT", "PREZZO ALT", "Prezzo Alt", "Prezzo ALT"],
     },
     "CLIENTI": {
         "id": ["ID", "Codice", "Codice numerico", "Cod. Cliente"],
