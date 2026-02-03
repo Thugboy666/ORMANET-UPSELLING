@@ -510,12 +510,14 @@ HTML = """
                 <th>Qty</th>
                 <th>LM</th>
                 <th>Sconto fisso (SCONTI2026)</th>
+                <th>RIC.BASE (%)</th>
                 <th>Prezzo baseline (RIC.BASE)</th>
-                <th>Prezzo minimo (RIC.)</th>
-                <th>Sconto commerciale</th>
+                <th>Prezzo minimo (RIC minimo)</th>
+                <th>Sconto richiesto (%)</th>
+                <th>Sconto effettivo (%)</th>
                 <th>Prezzo finale</th>
                 <th>Ric % finale</th>
-                <th>Ric % minimo</th>
+                <th>RIC minimo (%)</th>
                 <th>Note</th>
               </tr>
             </thead>
@@ -560,39 +562,85 @@ HTML = """
           <strong>Parametri margini (RIC)</strong>
           <button id="closeRic" class="secondary">Chiudi</button>
         </div>
-        <div class="modal-body">
+      <div class="modal-body">
           <div class="ric-help">
             <p><strong>RIC.BASE</strong>: È il ricarico di partenza: da qui parte il prezzo “standard” prima dello sconto commerciale. Più alto = più spazio per scontare senza scendere sotto il minimo.</p>
-            <p><strong>RIC (minimo)</strong>: È il ricarico minimo accettabile: sotto questo valore NON si può scendere. È il pavimento anti-perdita.</p>
-            <p><strong>Relazione</strong>: Lo sconto commerciale può muoversi solo tra RIC.BASE e RIC.</p>
+            <p><strong>RIC minimo</strong>: È il ricarico minimo accettabile: sotto questo valore NON si può scendere. È il pavimento anti-perdita.</p>
+            <p><strong>Relazione</strong>: Lo sconto commerciale può muoversi solo tra RIC.BASE e RIC minimo.</p>
             <p id="ricExample" class="info"></p>
           </div>
-          <label class="inline-toggle">
-            <input type="checkbox" id="ricOverrideToggle" />
-            Override manuale (avanzato)
-          </label>
-          <label for="ricCategorySelect">Categoria per reset</label>
-          <select id="ricCategorySelect"></select>
-          <div class="error" id="ricModalError"></div>
-          <table class="ric-table">
-            <thead>
-              <tr>
-                <th>Categoria</th>
-                <th>Listino</th>
-                <th>RIC.BASE</th>
-                <th>RIC</th>
-                <th>Note</th>
-                <th>Reset</th>
-              </tr>
-            </thead>
-            <tbody id="ricTableBody"></tbody>
-          </table>
-          <div class="actions inline">
-            <button id="saveRicOverrides">Salva override</button>
-            <button id="resetRicCategory" class="secondary">Reset override categoria</button>
+          <div class="tabs" id="ricTabs">
+            <button class="tab active" data-ric-tab="category">Margini per categoria</button>
+            <button class="tab" data-ric-tab="items">Eccezioni articoli</button>
           </div>
-          <div class="actions">
-            <button id="resetRicAll" class="secondary">Reset tutto (torna a SCONTI 2026)</button>
+          <div id="ricCategoryPanel">
+            <label class="inline-toggle">
+              <input type="checkbox" id="ricOverrideToggle" />
+              Override manuale (avanzato)
+            </label>
+            <label for="ricCategorySelect">Categoria per reset</label>
+            <select id="ricCategorySelect"></select>
+            <div class="error" id="ricModalError"></div>
+            <table class="ric-table">
+              <thead>
+                <tr>
+                  <th>Categoria</th>
+                  <th>Listino</th>
+                  <th>RIC.BASE</th>
+                  <th>RIC minimo</th>
+                  <th>Note</th>
+                  <th>Reset</th>
+                </tr>
+              </thead>
+              <tbody id="ricTableBody"></tbody>
+            </table>
+            <div class="actions inline">
+              <button id="saveRicOverrides">Salva override</button>
+              <button id="resetRicCategory" class="secondary">Reset override categoria</button>
+            </div>
+            <div class="actions">
+              <button id="resetRicAll" class="secondary">Reset tutto (torna a SCONTI 2026)</button>
+            </div>
+          </div>
+          <div id="ricItemPanel" style="display:none">
+            <p class="ric-help">
+              Eccezione articolo: imposta un RIC.BASE diverso solo per questo codice. Utile per prodotti premium.
+              Non modifica il RIC minimo.
+            </p>
+            <div class="error" id="ricItemError"></div>
+            <div class="warning" id="ricItemWarning"></div>
+            <table class="ric-table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Scope</th>
+                  <th>RIC.BASE override (%)</th>
+                  <th>Note</th>
+                  <th>Azioni</th>
+                </tr>
+              </thead>
+              <tbody id="ricItemTableBody"></tbody>
+            </table>
+            <div class="actions inline">
+              <button id="resetRicItems" class="secondary">Reset tutte le eccezioni</button>
+            </div>
+            <h4>Aggiungi eccezione</h4>
+            <label for="ricItemSku">SKU / Codice</label>
+            <input type="text" id="ricItemSku" />
+            <label for="ricItemScope">Scope</label>
+            <select id="ricItemScope">
+              <option value="all">All</option>
+              <option value="RIV">RIV</option>
+              <option value="RIV10">RIV10</option>
+              <option value="DIST">DIST</option>
+            </select>
+            <label for="ricItemOverride">RIC.BASE override (%)</label>
+            <input type="number" id="ricItemOverride" step="0.1" min="11" />
+            <label for="ricItemNote">Note</label>
+            <input type="text" id="ricItemNote" />
+            <div class="actions">
+              <button id="addRicItem">Salva eccezione</button>
+            </div>
           </div>
         </div>
       </div>
@@ -653,6 +701,18 @@ HTML = """
       const resetRicCategory = document.getElementById("resetRicCategory");
       const resetRicAll = document.getElementById("resetRicAll");
       const ricCategorySelect = document.getElementById("ricCategorySelect");
+      const ricTabs = document.getElementById("ricTabs");
+      const ricCategoryPanel = document.getElementById("ricCategoryPanel");
+      const ricItemPanel = document.getElementById("ricItemPanel");
+      const ricItemTableBody = document.getElementById("ricItemTableBody");
+      const ricItemSku = document.getElementById("ricItemSku");
+      const ricItemScope = document.getElementById("ricItemScope");
+      const ricItemOverride = document.getElementById("ricItemOverride");
+      const ricItemNote = document.getElementById("ricItemNote");
+      const ricItemError = document.getElementById("ricItemError");
+      const ricItemWarning = document.getElementById("ricItemWarning");
+      const addRicItem = document.getElementById("addRicItem");
+      const resetRicItems = document.getElementById("resetRicItems");
       let copyBlock = "";
       let mappingData = {};
       let activeMappingTab = "ORDINI";
@@ -674,6 +734,8 @@ HTML = """
       let lastQuoteRows = [];
       let ricRows = [];
       let ricOverrideEnabled = false;
+      let ricItemExceptions = [];
+      let activeRicTab = "category";
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -710,6 +772,14 @@ HTML = """
 
       function setRicModalError(message) {
         ricModalError.textContent = message || "";
+      }
+
+      function setRicItemError(message) {
+        ricItemError.textContent = message || "";
+      }
+
+      function setRicItemWarning(message) {
+        ricItemWarning.textContent = message || "";
       }
 
       async function api(path, payload) {
@@ -971,6 +1041,126 @@ HTML = """
         resetRicAll.disabled = !ricOverrideEnabled;
       }
 
+      function renderRicTabs() {
+        ricTabs.querySelectorAll(".tab").forEach((tab) => {
+          const target = tab.dataset.ricTab;
+          const isActive = target === activeRicTab;
+          tab.classList.toggle("active", isActive);
+        });
+        ricCategoryPanel.style.display = activeRicTab === "category" ? "" : "none";
+        ricItemPanel.style.display = activeRicTab === "items" ? "" : "none";
+      }
+
+      function buildScopeSelect(value) {
+        const select = document.createElement("select");
+        ["all", "RIV", "RIV10", "DIST"].forEach((scope) => {
+          const option = document.createElement("option");
+          option.value = scope;
+          option.textContent = scope.toUpperCase() === "ALL" ? "All" : scope;
+          if (scope === value) {
+            option.selected = true;
+          }
+          select.appendChild(option);
+        });
+        return select;
+      }
+
+      function renderRicItemExceptions() {
+        ricItemTableBody.innerHTML = "";
+        ricItemExceptions.forEach((item) => {
+          const tr = document.createElement("tr");
+          const skuCell = document.createElement("td");
+          const skuInput = document.createElement("input");
+          skuInput.type = "text";
+          skuInput.value = item.sku || "";
+          skuInput.disabled = true;
+          skuCell.appendChild(skuInput);
+          tr.appendChild(skuCell);
+
+          const scopeCell = document.createElement("td");
+          const scopeSelect = buildScopeSelect(item.scope || "all");
+          scopeCell.appendChild(scopeSelect);
+          tr.appendChild(scopeCell);
+
+          const ricCell = document.createElement("td");
+          const ricInput = document.createElement("input");
+          ricInput.type = "number";
+          ricInput.step = "0.1";
+          ricInput.min = "11";
+          ricInput.value = Number(item.ric_base_override).toFixed(2);
+          ricCell.appendChild(ricInput);
+          tr.appendChild(ricCell);
+
+          const noteCell = document.createElement("td");
+          const noteInput = document.createElement("input");
+          noteInput.type = "text";
+          noteInput.value = item.note || "";
+          noteCell.appendChild(noteInput);
+          tr.appendChild(noteCell);
+
+          const actionsCell = document.createElement("td");
+          const saveBtn = document.createElement("button");
+          saveBtn.type = "button";
+          saveBtn.textContent = "Salva";
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button";
+          deleteBtn.className = "secondary";
+          deleteBtn.textContent = "Elimina";
+          actionsCell.appendChild(saveBtn);
+          actionsCell.appendChild(deleteBtn);
+          tr.appendChild(actionsCell);
+
+          saveBtn.addEventListener("click", async () => {
+            setRicItemError("");
+            setRicItemWarning("");
+            const payload = {
+              original_sku: item.sku,
+              original_scope: item.scope,
+              sku: item.sku,
+              scope: scopeSelect.value,
+              ric_base_override: Number(ricInput.value),
+              note: noteInput.value
+            };
+            const res = await api("/api/ric/item_exceptions/update", payload);
+            if (!res.ok) {
+              setRicItemError(res.error || "Errore salvataggio eccezione");
+              return;
+            }
+            ricItemExceptions = res.items || [];
+            renderRicItemExceptions();
+          });
+
+          deleteBtn.addEventListener("click", async () => {
+            setRicItemError("");
+            setRicItemWarning("");
+            const res = await api("/api/ric/item_exceptions/delete", {
+              sku: item.sku,
+              scope: item.scope
+            });
+            if (!res.ok) {
+              setRicItemError(res.error || "Errore eliminazione eccezione");
+              return;
+            }
+            ricItemExceptions = res.items || [];
+            renderRicItemExceptions();
+          });
+
+          ricItemTableBody.appendChild(tr);
+        });
+      }
+
+      async function loadRicItemExceptions() {
+        setRicItemError("");
+        setRicItemWarning("");
+        const res = await api("/api/ric/item_exceptions/list");
+        if (!res.ok) {
+          setRicItemError(res.error || "Errore caricamento eccezioni");
+          return;
+        }
+        ricItemExceptions = res.items || [];
+        renderRicItemExceptions();
+      }
+
       async function loadRicOverrides() {
         setRicModalError("");
         const res = await api("/api/ric/get_overrides");
@@ -1033,7 +1223,7 @@ HTML = """
         if (pricingLimits.max_discount_real_min !== null && pricingLimits.max_discount_real_min !== undefined) {
           const limit = Number(pricingLimits.max_discount_real_min);
           maxDiscount.max = limit;
-          maxDiscountHint.textContent = `Max reale calcolato: ${limit.toFixed(2)}%`;
+          maxDiscountHint.textContent = `Sconto massimo consentito: ${limit.toFixed(2)}%`;
           if (globalParams.max_discount_percent > limit) {
             globalParams.max_discount_percent = limit;
             maxDiscount.value = limit.toFixed(2);
@@ -1111,6 +1301,10 @@ HTML = """
           fixedDiscountCell.textContent = Number(row.fixed_discount_percent).toFixed(2);
           tr.appendChild(fixedDiscountCell);
 
+          const ricBasePercentCell = document.createElement("td");
+          ricBasePercentCell.textContent = Number(row.ric_base).toFixed(2);
+          tr.appendChild(ricBasePercentCell);
+
           const basePriceCell = document.createElement("td");
           basePriceCell.textContent = Number(row.customer_base_price).toFixed(2);
           tr.appendChild(basePriceCell);
@@ -1135,6 +1329,10 @@ HTML = """
           });
           discountCell.appendChild(discountInput);
           tr.appendChild(discountCell);
+
+          const appliedDiscountCell = document.createElement("td");
+          appliedDiscountCell.textContent = Number(row.applied_discount_percent).toFixed(2);
+          tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
           const priceInput = document.createElement("input");
@@ -1163,7 +1361,7 @@ HTML = """
 
           const noteCell = document.createElement("td");
           if (row.clamp_reason === "MIN_RIC_FLOOR") {
-            noteCell.textContent = `Sconto bloccato: ric minimo ${Number(row.required_ric).toFixed(2)}% (floor=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)}; max_sconto_reale=${Number(row.max_discount_real).toFixed(2)}%)`;
+            noteCell.textContent = `Sconto bloccato: pavimento RIC minimo ${Number(row.required_ric).toFixed(2)}% (prezzo minimo=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)})`;
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
           } else {
@@ -1211,10 +1409,12 @@ HTML = """
             ["Sconto fisso", row.fixed_discount_percent],
             ["RIC.BASE", row.ric_base],
             ["RIC minimo", row.ric_floor],
-            ["RIC source", row.ric_source],
+            ["Fonte RIC.BASE", row.ric_base_source],
+            ["Fonte RIC minimo", row.ric_floor_source],
+            ["Eccezione articolo", row.item_exception_hit ? "Sì" : "No"],
             ["Prezzo baseline", row.baseline_price],
-            ["Prezzo minimo (RIC.)", row.floor_price],
-            ["Max sconto reale", row.max_discount_real],
+            ["Prezzo minimo (RIC minimo)", row.floor_price],
+            ["Sconto massimo consentito", row.max_discount_real],
             ["Max sconto effettivo", row.max_discount_effective],
             ["Buffer ric", row.buffer_ric],
             ["Aggressività", row.aggressivity],
@@ -1222,8 +1422,8 @@ HTML = """
             ["Max sconto (cap)", row.max_discount_percent],
             ["Sconto override", row.discount_override],
             ["Prezzo override", row.unit_price_override],
-            ["Sconto desiderato", row.desired_discount_percent],
-            ["Sconto applicato", row.applied_discount_percent],
+            ["Sconto richiesto", row.desired_discount_percent],
+            ["Sconto effettivo", row.applied_discount_percent],
             ["Prezzo candidato", row.candidate_price],
             ["Clamp reason", row.clamp_reason],
             ["Prezzo finale", row.final_price],
@@ -1330,7 +1530,7 @@ HTML = """
         if (hasClamp) {
           const maxDiscountReal = pricingLimits.max_discount_real_min;
           setClampBanner(
-            `Alcune righe sono al pavimento ric minimo (max sconto reale ${maxDiscountReal?.toFixed?.(2) ?? "-" }%).`
+            `Alcune righe sono al pavimento RIC minimo (sconto massimo consentito ${maxDiscountReal?.toFixed?.(2) ?? "-" }%).`
           );
         } else {
           setClampBanner("");
@@ -1535,8 +1735,11 @@ HTML = """
       ricParamsBtn.addEventListener("click", async () => {
         ricOverrideToggle.checked = false;
         ricOverrideEnabled = false;
+        activeRicTab = "category";
         await loadRicOverrides();
+        await loadRicItemExceptions();
         renderRicTable();
+        renderRicTabs();
         openRicModal();
       });
 
@@ -1547,6 +1750,15 @@ HTML = """
       ricOverrideToggle.addEventListener("change", () => {
         ricOverrideEnabled = ricOverrideToggle.checked;
         renderRicTable();
+      });
+
+      ricTabs.addEventListener("click", (event) => {
+        const target = event.target.closest(".tab");
+        if (!target) {
+          return;
+        }
+        activeRicTab = target.dataset.ricTab || "category";
+        renderRicTabs();
       });
 
       saveRicOverrides.addEventListener("click", async () => {
@@ -1598,6 +1810,51 @@ HTML = """
           return;
         }
         await loadRicOverrides();
+      });
+
+      addRicItem.addEventListener("click", async () => {
+        setRicItemError("");
+        setRicItemWarning("");
+        const skuValue = ricItemSku.value.trim();
+        const overrideValue = Number(ricItemOverride.value);
+        if (!skuValue) {
+          setRicItemError("Inserisci uno SKU.");
+          return;
+        }
+        if (!overrideValue || Number.isNaN(overrideValue)) {
+          setRicItemError("Inserisci un RIC.BASE override valido.");
+          return;
+        }
+        const res = await api("/api/ric/item_exceptions/add", {
+          sku: skuValue,
+          scope: ricItemScope.value,
+          ric_base_override: overrideValue,
+          note: ricItemNote.value
+        });
+        if (!res.ok) {
+          setRicItemError(res.error || "Errore salvataggio eccezione");
+          return;
+        }
+        ricItemExceptions = res.items || [];
+        if (res.warning) {
+          setRicItemWarning(res.warning);
+        }
+        ricItemSku.value = "";
+        ricItemOverride.value = "";
+        ricItemNote.value = "";
+        renderRicItemExceptions();
+      });
+
+      resetRicItems.addEventListener("click", async () => {
+        setRicItemError("");
+        setRicItemWarning("");
+        const res = await api("/api/ric/item_exceptions/reset_all");
+        if (!res.ok) {
+          setRicItemError(res.error || "Errore reset eccezioni");
+          return;
+        }
+        ricItemExceptions = res.items || [];
+        renderRicItemExceptions();
       });
 
       saveMappingBtn.addEventListener("click", async () => {
