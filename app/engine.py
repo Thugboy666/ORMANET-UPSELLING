@@ -593,8 +593,29 @@ def compute_upsell(
         if lm_value <= 0:
             warnings.append(f"LM mancante per SKU {item.codice}")
             return
+        override = overrides.get(item.codice, {})
+        qty_override = override.get("qty")
+        qty = max(1.0, float(qty_override)) if qty_override is not None else max(1.0, item.qty)
+        discount_override = override.get("discount_override")
+        unit_price_override = override.get("unit_price_override")
+        lock_override = bool(override.get("lock"))
+        alt_selected = bool(override.get("alt_selected"))
+        alt_price = stock_item.prezzo_alt if stock_item and stock_item.prezzo_alt is not None else None
+        alt_available = alt_price is not None and alt_price > 0
+        alt_missing_note = None
+        if alt_selected and not alt_available:
+            warnings.append(f"{item.codice}: PREZZO_ALT mancante, ALT disattivato.")
+            alt_missing_note = "ALT: PREZZO_ALT mancante"
+            alt_selected = False
+        lm_effective = lm_value
+        if alt_selected and alt_available and not lock_override:
+            # ALT: LM virtuale = PREZZO_ALT per il calcolo di RIC.BASE e prezzi.
+            lm_effective = float(alt_price)
+        lm_effective_source = lm_source
+        if alt_selected and alt_available and not lock_override:
+            lm_effective_source = "alt_virtual"
         pricing_payload, clamp_reason = apply_pricing_pipeline(
-            lm=lm_value,
+            lm=lm_effective,
             ric_base=ric_base,
             ric_floor=ric_floor,
             aggressivity=pricing.aggressivity,
@@ -614,18 +635,9 @@ def compute_upsell(
         final_ric = pricing_payload["final_ric"]
         applied_discount_pct = pricing_payload["applied_discount_pct"]
         buffer_ric = ric_base - ric_floor
-        override = overrides.get(item.codice, {})
-        qty_override = override.get("qty")
-        qty = max(1.0, float(qty_override)) if qty_override is not None else max(1.0, item.qty)
-        discount_override = override.get("discount_override")
-        unit_price_override = override.get("unit_price_override")
-        lock_override = bool(override.get("lock"))
-        alt_selected = bool(override.get("alt_selected"))
-        alt_price = stock_item.prezzo_alt if stock_item and stock_item.prezzo_alt is not None else None
-        alt_available = alt_price is not None and alt_price > 0
-        if discount_override is not None:
+        if discount_override is not None and not (alt_selected and alt_available and not lock_override):
             pricing_payload, clamp_reason = apply_pricing_pipeline(
-                lm=lm_value,
+                lm=lm_effective,
                 ric_base=ric_base,
                 ric_floor=ric_floor,
                 aggressivity=pricing.aggressivity,
@@ -641,20 +653,20 @@ def compute_upsell(
             candidate_price = pricing_payload["candidate_price"]
 
         final_price = computed_price
-        note = None
+        note = alt_missing_note
         min_unit_price = floor_price
         required_ric = ric_floor
-        if alt_selected and not alt_available:
-            note = "ALT non disponibile"
         if alt_selected and alt_available and not lock_override:
             final_price = round_up_to_step(float(alt_price), pricing.rounding)
+            discount_override = None
+            unit_price_override = None
             applied_discount_pct = (
                 (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
             )
             applied_discount_pct = max(0.0, min(100.0, applied_discount_pct))
             desired_discount_pct = applied_discount_pct
             effective_discount_pct = applied_discount_pct
-            final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
+            final_ric = (final_price / lm_effective - 1) * 100 if lm_effective else 0.0
             clamp_reason = "ALT_LOCKED"
             min_unit_price = None
             required_ric = None
@@ -671,7 +683,7 @@ def compute_upsell(
             if final_price < floor_price:
                 final_price = round_up_to_step(floor_price, pricing.rounding)
                 clamp_reason = "MIN_RIC_FLOOR"
-            final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
+            final_ric = (final_price / lm_effective - 1) * 100 if lm_effective else 0.0
             applied_discount_pct = (
                 (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
             )
@@ -684,7 +696,7 @@ def compute_upsell(
                 descrizione=item.descrizione,
                 qty=qty,
                 prezzo_unit=final_price,
-                lm=lm_value,
+                lm=lm_effective,
                 prezzo_alt=alt_price,
                 alt_available=alt_available,
                 alt_selected=alt_selected,
@@ -716,7 +728,7 @@ def compute_upsell(
                 codice=item.codice,
                 descrizione=item.descrizione,
                 categoria=macro,
-                lm=lm_value,
+                lm=lm_effective,
                 ric_base=ric_base,
                 ric_min=ric_floor,
                 sconto_fisso=fixed_discount,
@@ -736,8 +748,8 @@ def compute_upsell(
                 "available": available,
                 "available_date": available_date,
                 "listino_key": LISTINO_MAP.get(client.listino.upper().strip(), "RIV"),
-                "lm": lm_value,
-                "lm_source": lm_source,
+                "lm": lm_effective,
+                "lm_source": lm_effective_source,
                 "fixed_discount_percent": fixed_discount,
                 "ric_base": ric_base,
                 "ric_floor": ric_floor,
@@ -811,6 +823,8 @@ def compute_upsell(
 
     errors: list[dict] = []
     for row in suggestions:
+        if row.alt_selected:
+            continue
         if row.min_unit_price is not None and row.prezzo_unit < row.min_unit_price:
             errors.append(
                 {

@@ -253,6 +253,9 @@ HTML = """
       .row-error td {
         color: #9b0000;
       }
+      .row-alt {
+        background: #fffaf5;
+      }
       .lock-cell {
         text-align: center;
       }
@@ -1420,38 +1423,59 @@ HTML = """
         return Number(value).toFixed(digits);
       }
 
-      function renderTotals(totals, discrepancies, hasBlocking) {
+      function formatCurrency(value) {
+        if (value === null || value === undefined || Number.isNaN(value) || !Number.isFinite(value)) {
+          return "–";
+        }
+        return `€ ${Number(value).toFixed(2)}`;
+      }
+
+      function formatPercent(value) {
+        if (value === null || value === undefined || Number.isNaN(value) || !Number.isFinite(value)) {
+          return "–";
+        }
+        return `${Number(value).toFixed(2)}%`;
+      }
+
+      function renderTotals(totals, discrepancies, hasBlocking, summaryWarnings) {
         totalsGrid.innerHTML = "";
         totalsPanel.classList.toggle("error", Boolean(hasBlocking));
         const items = [
-          ["Totale righe", totals?.lines_count ?? "-"],
-          ["Totale pezzi", totals?.total_qty ?? "-"],
-          ["Totale imponibile (finale)", formatNumber(totals?.subtotal_final_exvat)],
-          ["Totale imponibile ALT", formatNumber(totals?.subtotal_alt_exvat)],
-          ["Totale imponibile NON-ALT", formatNumber(totals?.subtotal_non_alt_final_exvat)],
-          ["Totale baseline NON-ALT", formatNumber(totals?.subtotal_baseline_exvat)],
-          ["Risparmio vs baseline (NON-ALT)", formatNumber(totals?.savings_vs_baseline_exvat)],
-          ["Sconto medio pesato NON-ALT (%)", formatNumber(totals?.avg_discount_non_alt_pct)],
+          ["Righe", totals?.lines_count ?? "–"],
+          ["Pezzi totali", totals?.total_qty ?? "–"],
+          ["Totale imponibile", formatCurrency(totals?.subtotal_final_exvat)],
+          ["Totale ALT (imponibile)", formatCurrency(totals?.subtotal_alt_exvat)],
+          ["Totale NON-ALT (imponibile)", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
           [
-            "Ric% NON-ALT (min/medio/max)",
-            `${formatNumber(totals?.min_final_ric_non_alt)} / ${formatNumber(totals?.avg_final_ric_non_alt)} / ${formatNumber(totals?.max_final_ric_non_alt)}`
+            "Risparmio vs baseline (solo NON-ALT)",
+            formatCurrency(totals?.savings_vs_baseline_non_alt_exvat)
+          ],
+          ["Margini NON-ALT", ""],
+          ["RIC% medio", formatPercent(totals?.avg_final_ric_non_alt)],
+          [
+            "RIC% min / max",
+            `${formatPercent(totals?.min_final_ric_non_alt)} / ${formatPercent(totals?.max_final_ric_non_alt)}`
           ]
         ];
         items.forEach(([label, value]) => {
           const div = document.createElement("div");
-          div.innerHTML = `<strong>${label}:</strong> ${value}`;
+          if (value === "") {
+            div.innerHTML = `<strong>${label}</strong>`;
+          } else {
+            div.innerHTML = `<strong>${label}:</strong> ${value}`;
+          }
           totalsGrid.appendChild(div);
         });
-        const issues = discrepancies || [];
+        const issues = [...(summaryWarnings || []), ...(discrepancies || []).map((item) => item.message || item)];
         if (issues.length) {
           totalsDiscrepancies.style.display = "";
           const list = issues.slice(0, 6);
           const remaining = issues.length - list.length;
           const itemsHtml = list
-            .map((issue) => `<li>${issue.message || issue}</li>`)
+            .map((issue) => `<li>${issue}</li>`)
             .join("");
           totalsDiscrepancies.innerHTML = `
-            <strong>NON QUADRA:</strong>
+            <strong>Controlli:</strong>
             <ul>${itemsHtml}${remaining > 0 ? `<li>+${remaining} altre</li>` : ""}</ul>
           `;
         } else {
@@ -1467,6 +1491,10 @@ HTML = """
         const errorSkus = new Set((validation?.errors || []).map((err) => err.sku));
         rows.forEach((row) => {
           const tr = document.createElement("tr");
+          const isAltLocked = row.clamp_reason === "ALT_LOCKED";
+          if (row.alt_selected) {
+            tr.classList.add("row-alt");
+          }
           if (errorSkus.has(row.codice)) {
             tr.classList.add("row-error");
           }
@@ -1475,6 +1503,7 @@ HTML = """
           const lockInput = document.createElement("input");
           lockInput.type = "checkbox";
           lockInput.checked = Boolean(perRowOverrides[row.codice]?.lock);
+          lockInput.disabled = isAltLocked;
           lockInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.lock = lockInput.checked;
@@ -1503,6 +1532,9 @@ HTML = """
 
           const altCell = document.createElement("td");
           altCell.className = "alt-column";
+          if (row.prezzo_alt) {
+            altCell.title = `PREZZO_ALT: € ${Number(row.prezzo_alt).toFixed(2)}`;
+          }
           if (row.alt_available) {
             const badge = document.createElement("span");
             badge.className = "alt-badge";
@@ -1564,50 +1596,60 @@ HTML = """
           tr.appendChild(floorPriceCell);
 
           const discountCell = document.createElement("td");
-          const discountInput = document.createElement("input");
-          discountInput.type = "number";
-          discountInput.step = "0.1";
-          discountInput.min = "0";
-          discountInput.value = Number(row.desired_discount_pct).toFixed(2);
-          discountInput.disabled = currentPriceMode !== "discount";
-          discountInput.addEventListener("change", () => {
-            const override = perRowOverrides[row.codice] || {};
-            override.discount_override = Number(discountInput.value);
-            delete override.unit_price_override;
-            perRowOverrides[row.codice] = override;
-            scheduleRecalc();
-          });
-          discountCell.appendChild(discountInput);
+          if (isAltLocked) {
+            discountCell.textContent = "–";
+          } else {
+            const discountInput = document.createElement("input");
+            discountInput.type = "number";
+            discountInput.step = "0.1";
+            discountInput.min = "0";
+            discountInput.value = Number(row.desired_discount_pct).toFixed(2);
+            discountInput.disabled = currentPriceMode !== "discount";
+            discountInput.addEventListener("change", () => {
+              const override = perRowOverrides[row.codice] || {};
+              override.discount_override = Number(discountInput.value);
+              delete override.unit_price_override;
+              perRowOverrides[row.codice] = override;
+              scheduleRecalc();
+            });
+            discountCell.appendChild(discountInput);
+          }
           tr.appendChild(discountCell);
 
           const capCell = document.createElement("td");
           const pricingRow = pricingByCode.get(row.codice);
           const capValue = pricingRow?.sconto_cap ?? row.max_discount_real_pct;
-          capCell.textContent = capValue !== undefined && capValue !== null
-            ? Number(capValue).toFixed(2)
-            : "";
+          capCell.textContent = isAltLocked
+            ? "–"
+            : capValue !== undefined && capValue !== null
+              ? Number(capValue).toFixed(2)
+              : "";
           tr.appendChild(capCell);
 
           const appliedDiscountCell = document.createElement("td");
           const effectiveValue = pricingRow?.sconto_effettivo ?? row.applied_discount_pct;
-          appliedDiscountCell.textContent = Number(effectiveValue).toFixed(2);
+          appliedDiscountCell.textContent = isAltLocked ? "–" : Number(effectiveValue).toFixed(2);
           tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
-          const priceInput = document.createElement("input");
-          priceInput.type = "number";
-          priceInput.step = "0.01";
-          priceInput.min = "0";
-          priceInput.value = Number(row.prezzo_unit).toFixed(2);
-          priceInput.disabled = currentPriceMode !== "final_price";
-          priceInput.addEventListener("change", () => {
-            const override = perRowOverrides[row.codice] || {};
-            override.unit_price_override = Number(priceInput.value);
-            delete override.discount_override;
-            perRowOverrides[row.codice] = override;
-            scheduleRecalc();
-          });
-          priceCell.appendChild(priceInput);
+          if (isAltLocked) {
+            priceCell.textContent = Number(row.prezzo_unit).toFixed(2);
+          } else {
+            const priceInput = document.createElement("input");
+            priceInput.type = "number";
+            priceInput.step = "0.01";
+            priceInput.min = "0";
+            priceInput.value = Number(row.prezzo_unit).toFixed(2);
+            priceInput.disabled = currentPriceMode !== "final_price";
+            priceInput.addEventListener("change", () => {
+              const override = perRowOverrides[row.codice] || {};
+              override.unit_price_override = Number(priceInput.value);
+              delete override.discount_override;
+              perRowOverrides[row.codice] = override;
+              scheduleRecalc();
+            });
+            priceCell.appendChild(priceInput);
+          }
           tr.appendChild(priceCell);
 
           const ricCell = document.createElement("td");
@@ -1805,7 +1847,12 @@ HTML = """
         setValidation(lastValidation.ok ? "" : `Errore ric minimo: ${validationErrors}`);
         const warnings = (res.warnings || []).join(" | ");
         setWarning(warnings);
-        renderTotals(res.totals || {}, res.discrepancies || [], res.has_blocking_issues);
+        renderTotals(
+          res.totals || {},
+          res.discrepancies || [],
+          res.has_blocking_issues,
+          res.summary_warnings || []
+        );
         const hasClamp = (res.quote || []).some((row) => row.clamp_reason === "MIN_RIC_FLOOR");
         if (hasClamp) {
           const maxDiscountReal = pricingLimits.max_discount_real_min;

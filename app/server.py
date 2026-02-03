@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -408,6 +409,9 @@ def build_ric_example(trace: dict) -> str:
 
 
 def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str, causale: str) -> str:
+    def format_optional(value: float | None) -> str:
+        return f"{value:.2f}" if value is not None else "-"
+
     lines = [
         f"Cliente: {client.ragione_sociale} (ID: {client.client_id}, Listino: {client.listino})",
         f"Ordine: {order_name}",
@@ -420,7 +424,7 @@ def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str,
             f"- {row.codice} | {row.descrizione} | {row.qty} | LM {row.lm:.2f} | "
             f"Sconto% {row.desired_discount_pct:.2f} | Prezzo {row.prezzo_unit:.2f} | "
             f"Ric% {row.final_ric_percent:.2f} | "
-            f"Ric min% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
+            f"Ric min% {format_optional(row.required_ric)} | {row.totale:.2f} | Disp {row.disp} | "
             f"Disponibile dal {row.disponibile_dal or '-'} | Note {note}"
         )
     return "\n".join(lines)
@@ -518,11 +522,8 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
     subtotal_alt_exvat = sum(row.prezzo_unit * row.qty for row in alt_rows)
     subtotal_non_alt_final_exvat = sum(row.prezzo_unit * row.qty for row in non_alt_rows)
     subtotal_baseline_exvat = sum(row.customer_base_price * row.qty for row in non_alt_rows)
-    savings_vs_baseline_exvat = subtotal_baseline_exvat - subtotal_non_alt_final_exvat
-    avg_discount_non_alt_pct = (
-        savings_vs_baseline_exvat / subtotal_baseline_exvat * 100
-        if subtotal_baseline_exvat
-        else 0.0
+    savings_vs_baseline_exvat = (
+        subtotal_baseline_exvat - subtotal_non_alt_final_exvat if non_alt_rows else None
     )
     non_alt_ric_values = [row.final_ric_percent for row in non_alt_rows]
     min_final_ric_non_alt = min(non_alt_ric_values) if non_alt_ric_values else None
@@ -533,6 +534,31 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
         if non_alt_rows
         else None
     )
+    summary_warnings: list[str] = []
+    if abs(subtotal_final_exvat - (subtotal_alt_exvat + subtotal_non_alt_final_exvat)) > 0.01:
+        summary_warnings.append(
+            "⚠ Controllo: totale imponibile non coerente con la somma ALT + NON-ALT."
+        )
+    numeric_checks = {
+        "totale_imponibile": subtotal_final_exvat,
+        "totale_alt": subtotal_alt_exvat,
+        "totale_non_alt": subtotal_non_alt_final_exvat,
+        "baseline_non_alt": subtotal_baseline_exvat,
+        "pezzi": total_qty,
+    }
+    if any((not math.isfinite(value)) for value in numeric_checks.values()):
+        summary_warnings.append(
+            "⚠ Controllo: valori incoerenti rilevati (verifica prezzi/qty)."
+        )
+    if any(value < -0.01 for value in numeric_checks.values()):
+        summary_warnings.append(
+            "⚠ Controllo: valori negativi inattesi rilevati (verifica prezzi/qty)."
+        )
+    ric_checks = [min_final_ric_non_alt, max_final_ric_non_alt, avg_final_ric_non_alt]
+    if any(value is not None and not math.isfinite(value) for value in ric_checks):
+        summary_warnings.append(
+            "⚠ Controllo: margini NON-ALT incoerenti (verifica prezzi/qty)."
+        )
     discrepancies: list[dict[str, Any]] = []
     for row in non_alt_rows:
         if row.min_unit_price is not None and row.prezzo_unit < row.min_unit_price:
@@ -582,16 +608,16 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
             "lines_count": totals_lines,
             "total_qty": total_qty,
             "subtotal_final_exvat": subtotal_final_exvat,
-            "subtotal_baseline_exvat": subtotal_baseline_exvat,
             "subtotal_alt_exvat": subtotal_alt_exvat,
             "subtotal_non_alt_final_exvat": subtotal_non_alt_final_exvat,
-            "savings_vs_baseline_exvat": savings_vs_baseline_exvat,
-            "avg_discount_non_alt_pct": avg_discount_non_alt_pct,
+            "subtotal_baseline_non_alt_exvat": subtotal_baseline_exvat if non_alt_rows else None,
+            "savings_vs_baseline_non_alt_exvat": savings_vs_baseline_exvat,
             "min_final_ric_non_alt": min_final_ric_non_alt,
             "avg_final_ric_non_alt": avg_final_ric_non_alt,
             "max_final_ric_non_alt": max_final_ric_non_alt,
         },
         "discrepancies": discrepancies,
+        "summary_warnings": summary_warnings,
         "has_blocking_issues": has_blocking_issues,
         "pricing": {
             "aggressivity": STATE.pricing.aggressivity,
@@ -873,6 +899,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if self.path == "/api/set_alt_mode":
             STATE.alt_mode = bool(payload.get("alt_mode"))
+            if not STATE.alt_mode:
+                for override in STATE.per_row_overrides.values():
+                    override.pop("alt_selected", None)
             self._send_json({"ok": True, "alt_mode": STATE.alt_mode})
             return
 
@@ -961,6 +990,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     alt_mode = global_params.get("alt_mode")
                     if alt_mode is not None:
                         STATE.alt_mode = bool(alt_mode)
+                        if not STATE.alt_mode:
+                            for override in STATE.per_row_overrides.values():
+                                override.pop("alt_selected", None)
                     rounding_value = global_params.get("rounding", STATE.pricing.rounding)
                     if rounding_value in ("NONE", "", None):
                         rounding_value = None
