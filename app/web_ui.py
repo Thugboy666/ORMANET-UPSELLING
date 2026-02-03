@@ -75,6 +75,33 @@ HTML = """
         border-radius: 6px;
         border: 1px solid #ddd;
       }
+      .history-list {
+        margin-top: 6px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 8px;
+        max-height: 160px;
+        overflow-y: auto;
+        background: #fffaf5;
+      }
+      .history-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+        font-size: 13px;
+      }
+      .history-item input {
+        margin: 0;
+      }
+      .history-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #444;
+      }
+      .history-help {
+        color: #6b6b6b;
+      }
       button {
         background: var(--orange);
         color: var(--black);
@@ -132,7 +159,11 @@ HTML = """
         <label>Ordine Upsell</label>
         <select id="orderSelect"></select>
         <label>Ordini Storici (4)</label>
-        <select id="historySelect" multiple size="6"></select>
+        <div class="history-meta">
+          <div id="historyCounter">Selezionati: 0/4</div>
+          <div class="history-help">Seleziona esattamente 4 file STORICO</div>
+        </div>
+        <div id="historyList" class="history-list"></div>
         <label>Causale</label>
         <select id="causaleSelect">
           <option value="DISPONIBILE">DISPONIBILE</option>
@@ -178,7 +209,8 @@ HTML = """
       const statusList = document.getElementById("statusList");
       const clientSelect = document.getElementById("clientSelect");
       const orderSelect = document.getElementById("orderSelect");
-      const historySelect = document.getElementById("historySelect");
+      const historyList = document.getElementById("historyList");
+      const historyCounter = document.getElementById("historyCounter");
       const causaleSelect = document.getElementById("causaleSelect");
       const aggressivitaSelect = document.getElementById("aggressivitaSelect");
       const computeBtn = document.getElementById("computeBtn");
@@ -212,7 +244,7 @@ HTML = """
         const items = [
           ["Clienti caricati", status.clients_loaded],
           ["Stock caricato", status.stock_loaded],
-          ["4 storici caricati", status.histories_loaded],
+          [`Storici selezionati (${status.histories_selected_count}/4)`, status.histories_ok],
           ["Ordine upsell caricato", status.order_loaded],
           ["Causale selezionata", status.causale_set],
           ["Cliente selezionato", status.client_selected]
@@ -262,17 +294,12 @@ HTML = """
         renderStatus(status);
         populateSelect(clientSelect, status.clients, "Seleziona cliente");
         populateSelect(orderSelect, status.upsell_orders, "Seleziona ordine");
-        populateSelect(historySelect, status.storico_orders, "");
+        renderHistoryList(status.storico_orders, status.selected_histories);
         if (status.selected_client) {
           clientSelect.value = status.selected_client;
         }
         if (status.selected_order) {
           orderSelect.value = status.selected_order;
-        }
-        if (status.selected_histories.length) {
-          [...historySelect.options].forEach((opt) => {
-            opt.selected = status.selected_histories.includes(opt.value);
-          });
         }
         if (status.causale) {
           causaleSelect.value = status.causale;
@@ -280,6 +307,49 @@ HTML = """
         if (status.aggressivita !== null && status.aggressivita !== undefined) {
           aggressivitaSelect.value = String(status.aggressivita);
         }
+      }
+
+      function updateHistoryCounter(selectedCount) {
+        historyCounter.textContent = `Selezionati: ${selectedCount}/4`;
+      }
+
+      function renderHistoryList(options, selected) {
+        historyList.innerHTML = "";
+        const selectedSet = new Set(selected || []);
+        options.forEach((optData) => {
+          const wrapper = document.createElement("label");
+          wrapper.className = "history-item";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.name = "storici";
+          checkbox.value = optData.value;
+          checkbox.checked = selectedSet.has(optData.value);
+          checkbox.addEventListener("change", onHistoryChange);
+          const text = document.createElement("span");
+          text.textContent = optData.label;
+          wrapper.appendChild(checkbox);
+          wrapper.appendChild(text);
+          historyList.appendChild(wrapper);
+        });
+        updateHistoryCounter(selectedSet.size);
+      }
+
+      async function onHistoryChange(event) {
+        setError("");
+        const selected = [...historyList.querySelectorAll('input[name="storici"]:checked')].map(
+          (input) => input.value
+        );
+        if (selected.length > 4) {
+          event.target.checked = false;
+          setError("Puoi selezionare al massimo 4 storici.");
+          return;
+        }
+        updateHistoryCounter(selected.length);
+        const res = await api("/api/set_histories", { histories: selected });
+        if (res.ok === false || res.success === false) {
+          setError(res.error || "Errore selezione storici");
+        }
+        await refreshStatus();
       }
 
       document.getElementById("loadDefaults").addEventListener("click", async () => {
@@ -302,12 +372,6 @@ HTML = """
       orderSelect.addEventListener("change", async () => {
         setError("");
         await api("/api/set_order", { order_name: orderSelect.value });
-        await refreshStatus();
-      });
-
-      historySelect.addEventListener("change", async () => {
-        const selected = [...historySelect.selectedOptions].map((opt) => opt.value);
-        await api("/api/set_histories", { histories: selected });
         await refreshStatus();
       });
 

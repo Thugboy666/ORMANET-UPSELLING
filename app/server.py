@@ -126,11 +126,16 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path == "/api/status":
             orders = list_orders()
+            histories_selected = [path.name for path in STATE.histories]
+            histories_count = len(histories_selected)
             self._send_json(
                 {
                     "clients_loaded": bool(STATE.clients),
                     "stock_loaded": bool(STATE.stock),
-                    "histories_loaded": len(STATE.histories) == 4,
+                    "histories_loaded": histories_count == 4,
+                    "histories_selected_count": histories_count,
+                    "histories_selected": histories_selected,
+                    "histories_ok": histories_count == 4,
                     "order_loaded": STATE.current_order is not None,
                     "causale_set": STATE.causale in CAUSALI,
                     "client_selected": STATE.selected_client_id is not None,
@@ -147,7 +152,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "storico_orders": [{"value": name, "label": name} for name in orders["storico"]],
                     "selected_client": STATE.selected_client_id or "",
                     "selected_order": STATE.current_order.name if STATE.current_order else "",
-                    "selected_histories": [path.name for path in STATE.histories],
+                    "selected_histories": histories_selected,
                     "causale": STATE.causale or "",
                     "aggressivita": STATE.aggressivita,
                 }
@@ -204,22 +209,65 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/set_histories":
-            histories = payload.get("histories", [])
-            if isinstance(histories, list):
-                paths = [ORDERS_DIR / name for name in histories if name]
-                if len(paths) == 4 and all(path.exists() for path in paths):
-                    STATE.histories = paths
-                    STATE.reset_results()
-                else:
-                    self._send_json(
-                        {
-                            "success": False,
-                            "error": "Seleziona esattamente 4 file storici validi.",
-                        },
-                        status=HTTPStatus.BAD_REQUEST,
-                    )
-                    return
-            self._send_json({"success": True})
+            histories = payload.get("histories", payload.get("files", []))
+            if isinstance(histories, str):
+                histories = [histories]
+            if not isinstance(histories, list):
+                histories = []
+            cleaned: list[str] = []
+            invalid_names: list[str] = []
+            for name in histories:
+                if not isinstance(name, str) or not name:
+                    continue
+                candidate = Path(name)
+                if candidate.is_absolute() or ".." in candidate.parts or candidate.name != name:
+                    invalid_names.append(name)
+                    continue
+                cleaned.append(candidate.name)
+            if invalid_names:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "invalid_names",
+                        "invalid": invalid_names,
+                        "received": histories,
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            if len(cleaned) > 4:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "too_many_files",
+                        "max": 4,
+                        "count": len(cleaned),
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            paths = [ORDERS_DIR / name for name in cleaned]
+            missing = [path.name for path in paths if not path.exists()]
+            if missing:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "missing_files",
+                        "missing": missing,
+                        "received": cleaned,
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            STATE.histories = paths
+            STATE.reset_results()
+            self._send_json(
+                {
+                    "ok": True,
+                    "selected": cleaned,
+                    "count": len(cleaned),
+                }
+            )
             return
 
         if self.path == "/api/set_causale":
