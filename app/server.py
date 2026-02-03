@@ -8,6 +8,7 @@ import subprocess
 import sys
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -27,9 +28,10 @@ from app.engine import (
     compute_upsell,
     export_excel,
     get_fixed_discount,
-    get_ric_params,
     load_json,
     map_macro_category,
+    normalize_sku,
+    resolve_ric_values,
 )
 from app.io_loaders import (
     DEFAULT_FIELD_MAPPING,
@@ -54,6 +56,7 @@ CONFIG_DIR = BASE_DIR / "config"
 LOGS_DIR = BASE_DIR / "logs"
 MAPPING_PATH = CONFIG_DIR / "field_mapping.json"
 RIC_OVERRIDES_PATH = CONFIG_DIR / "ric_overrides.json"
+RIC_ITEM_EXCEPTIONS_PATH = CONFIG_DIR / "ric_item_exceptions.json"
 
 
 @dataclass
@@ -75,6 +78,7 @@ class AppState:
     copy_block: str = ""
     ric_overrides: dict[str, dict] = field(default_factory=dict)
     ric_override_errors: list[str] = field(default_factory=list)
+    ric_item_exceptions: list[dict[str, Any]] = field(default_factory=list)
 
     def reset_results(self) -> None:
         self.upsell_rows = []
@@ -182,6 +186,110 @@ def validate_ric_overrides(sconti: dict, overrides: dict[str, dict]) -> list[str
 STATE.ric_overrides = load_ric_overrides()
 
 
+def load_ric_item_exceptions() -> list[dict[str, Any]]:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not RIC_ITEM_EXCEPTIONS_PATH.exists():
+        payload = {"version": 1, "updated_at": datetime.utcnow().isoformat(), "items": []}
+        save_ric_item_exceptions(payload["items"])
+        return payload["items"]
+    with RIC_ITEM_EXCEPTIONS_PATH.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    items = raw.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return items
+
+
+def save_ric_item_exceptions(items: list[dict[str, Any]]) -> None:
+    payload = {"version": 1, "updated_at": datetime.utcnow().isoformat(), "items": items}
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with RIC_ITEM_EXCEPTIONS_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def normalize_item_exception_scope(scope: str) -> str:
+    value = str(scope or "all").upper().strip()
+    value = value.replace("+", "")
+    if value in ("", "ALL"):
+        return "all"
+    if value == "RIV10":
+        return "RIV10"
+    if value in ("RIV", "DIST"):
+        return value
+    return "all"
+
+
+def normalize_item_exception_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    sku = normalize_sku(str(entry.get("sku", "")))
+    scope = normalize_item_exception_scope(entry.get("scope", "all"))
+    return {
+        "sku": sku,
+        "scope": scope,
+        "ric_base_override": float(entry.get("ric_base_override", 0.0)),
+        "note": str(entry.get("note", "")),
+    }
+
+
+def find_stock_item_by_sku(sku: str) -> Any | None:
+    normalized = normalize_sku(sku)
+    for code, item in STATE.stock.items():
+        if normalize_sku(code) == normalized:
+            return item
+    return None
+
+
+def listino_label_from_scope(scope: str) -> str:
+    if scope == "RIV10":
+        return "LISTINO RI+10%"
+    if scope == "DIST":
+        return "LISTINO DI"
+    return "LISTINO RI"
+
+
+def validate_item_exception(entry: dict[str, Any]) -> tuple[bool, str | None]:
+    ric_base = float(entry.get("ric_base_override", 0.0))
+    if ric_base < ABSOLUTE_MIN_MARKUP:
+        return False, "RIC.BASE override deve essere ≥ 11%."
+    sku = entry.get("sku", "")
+    scope = entry.get("scope", "all")
+    stock_item = find_stock_item_by_sku(str(sku))
+    if not stock_item:
+        return True, None
+    try:
+        sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+        category_map = load_json(CONFIG_DIR / "category_map.json")
+        macro = map_macro_category(stock_item.categoria, category_map, STATE.logger)
+        if macro == "UNKNOWN":
+            return True, None
+        listino_keys = ["RIV", "RIV+10", "DIST"] if scope == "all" else []
+        if scope == "RIV10":
+            listino_keys = ["RIV+10"]
+        if scope == "RIV":
+            listino_keys = ["RIV"]
+        if scope == "DIST":
+            listino_keys = ["DIST"]
+        floors = []
+        for listino_key in listino_keys:
+            ric_values = resolve_ric_values(
+                macro=macro,
+                listino=listino_label_from_scope("RIV10" if listino_key == "RIV+10" else listino_key),
+                sconti=sconti,
+                ric_overrides=STATE.ric_overrides,
+                item_exceptions=None,
+                sku=sku,
+            )
+            floors.append(float(ric_values["ric_floor"]))
+        floor_required = max(floors) if floors else ABSOLUTE_MIN_MARKUP
+        if ric_base < floor_required:
+            return False, f"RIC.BASE override {ric_base:.2f}% sotto il RIC minimo {floor_required:.2f}%."
+    except Exception:
+        return True, None
+    return True, None
+
+
+STATE.ric_item_exceptions = load_ric_item_exceptions()
+
+
 def refresh_ric_override_errors() -> None:
     try:
         sconti = load_json(CONFIG_DIR / "sconti_2026.json")
@@ -251,7 +359,7 @@ def build_ric_table(sconti: dict, overrides: dict[str, dict]) -> list[dict[str, 
 def build_ric_example(trace: dict) -> str:
     rows = trace.get("rows", []) if isinstance(trace, dict) else []
     if not rows:
-        return "Esempio: LM 0,00 – RIC.BASE 0% -> 0,00; RIC 0% -> 0,00; sconto max reale ~ 0,0%."
+        return "Esempio: LM 0,00 – RIC.BASE 0% -> 0,00; RIC minimo 0% -> 0,00; sconto massimo consentito ~ 0,0%."
     row = rows[0]
     lm = float(row.get("lm", 0.0))
     ric_base = float(row.get("ric_base", 0.0))
@@ -261,7 +369,7 @@ def build_ric_example(trace: dict) -> str:
     max_discount = float(row.get("max_discount_real", 0.0))
     return (
         f"Esempio: LM {lm:.2f} – RIC.BASE {ric_base:.0f}% -> {baseline:.2f}; "
-        f"RIC {ric_floor:.0f}% -> {floor:.2f}; sconto max reale ~ {max_discount:.1f}%."
+        f"RIC minimo {ric_floor:.0f}% -> {floor:.2f}; sconto massimo consentito ~ {max_discount:.1f}%."
     )
 
 
@@ -293,6 +401,10 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "lm": row.lm,
             "macro_categoria": row.macro_categoria,
             "fixed_discount_percent": row.fixed_discount_percent,
+            "ric_base": row.ric_base,
+            "ric_base_source": row.ric_base_source,
+            "ric_floor_source": row.ric_floor_source,
+            "item_exception_hit": row.item_exception_hit,
             "customer_base_price": row.customer_base_price,
             "max_discount_real": row.max_discount_real,
             "desired_discount_percent": row.desired_discount_percent,
@@ -572,6 +684,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     logger=STATE.logger,
                     overrides=STATE.per_row_overrides,
                     ric_overrides=STATE.ric_overrides,
+                    item_exceptions=STATE.ric_item_exceptions,
                 )
                 pricing_limits = build_pricing_limits(STATE.trace)
                 if pricing_limits.get("buffer_ric_example") is not None:
@@ -675,6 +788,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     logger=STATE.logger,
                     overrides=STATE.per_row_overrides,
                     ric_overrides=STATE.ric_overrides,
+                    item_exceptions=STATE.ric_item_exceptions,
                 )
                 pricing_limits = build_pricing_limits(STATE.trace)
                 if pricing_limits.get("buffer_ric_example") is not None:
@@ -733,9 +847,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
-                ric_floor, ric_base, ric_source = get_ric_params(
-                    macro, client.listino, sconti, STATE.ric_overrides
+                ric_values = resolve_ric_values(
+                    macro=macro,
+                    listino=client.listino,
+                    sconti=sconti,
+                    ric_overrides=STATE.ric_overrides,
+                    item_exceptions=STATE.ric_item_exceptions,
+                    sku=sku,
                 )
+                ric_floor = float(ric_values["ric_floor"])
+                ric_base = float(ric_values["ric_base"])
+                ric_base_source = str(ric_values["ric_base_source"])
+                ric_floor_source = str(ric_values["ric_floor_source"])
+                item_exception_hit = bool(ric_values["item_exception_hit"])
                 if stock_item.lm <= 0:
                     raise ValueError("LM mancante")
                 fixed_discount = get_fixed_discount(macro, client.listino, sconti)
@@ -754,7 +878,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "fixed_discount_percent": fixed_discount,
                         "customer_base_price": baseline_price,
                         "ric_base": ric_base,
-                        "ric_source": ric_source,
+                        "ric_base_source": ric_base_source,
+                        "ric_floor_source": ric_floor_source,
+                        "item_exception_hit": item_exception_hit,
                         "max_discount_real": max_discount_real,
                     }
                 )
@@ -958,6 +1084,112 @@ class RequestHandler(BaseHTTPRequestHandler):
                     {"ok": False, "error": f"Errore caricamento RIC: {exc}"},
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
+            return
+
+        if self.path == "/api/ric/item_exceptions/list":
+            items = sorted(
+                STATE.ric_item_exceptions,
+                key=lambda item: (normalize_sku(str(item.get("sku", ""))), str(item.get("scope", ""))),
+            )
+            self._send_json({"ok": True, "items": items})
+            return
+
+        if self.path == "/api/ric/item_exceptions/add":
+            incoming = normalize_item_exception_entry(payload)
+            if not incoming.get("sku"):
+                self._send_json(
+                    {"ok": False, "error": "SKU mancante."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            valid, error = validate_item_exception(incoming)
+            if not valid:
+                self._send_json({"ok": False, "error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
+            key = (incoming["sku"], incoming["scope"])
+            if any(
+                normalize_sku(str(item.get("sku", ""))) == key[0] and str(item.get("scope")) == key[1]
+                for item in STATE.ric_item_exceptions
+            ):
+                self._send_json(
+                    {"ok": False, "error": "Eccezione già presente per questo SKU e scope."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            STATE.ric_item_exceptions.append(incoming)
+            save_ric_item_exceptions(STATE.ric_item_exceptions)
+            warning = None
+            if find_stock_item_by_sku(incoming["sku"]) is None:
+                warning = "SKU non trovato nei dati caricati: eccezione salvata comunque."
+            self._send_json({"ok": True, "items": STATE.ric_item_exceptions, "warning": warning})
+            return
+
+        if self.path == "/api/ric/item_exceptions/update":
+            incoming = normalize_item_exception_entry(payload)
+            original_sku = normalize_sku(str(payload.get("original_sku", incoming.get("sku", ""))))
+            original_scope = normalize_item_exception_scope(
+                payload.get("original_scope", incoming.get("scope", "all"))
+            )
+            if not incoming.get("sku"):
+                self._send_json(
+                    {"ok": False, "error": "SKU mancante."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            valid, error = validate_item_exception(incoming)
+            if not valid:
+                self._send_json({"ok": False, "error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
+            updated = False
+            for idx, item in enumerate(STATE.ric_item_exceptions):
+                if normalize_sku(str(item.get("sku", ""))) == original_sku and str(
+                    item.get("scope", "")
+                ) == original_scope:
+                    STATE.ric_item_exceptions[idx] = incoming
+                    updated = True
+                    break
+            if not updated:
+                self._send_json(
+                    {"ok": False, "error": "Eccezione non trovata."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            save_ric_item_exceptions(STATE.ric_item_exceptions)
+            self._send_json({"ok": True, "items": STATE.ric_item_exceptions})
+            return
+
+        if self.path == "/api/ric/item_exceptions/delete":
+            sku = normalize_sku(str(payload.get("sku", "")))
+            scope = normalize_item_exception_scope(payload.get("scope", "all"))
+            if not sku:
+                self._send_json(
+                    {"ok": False, "error": "SKU mancante."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            before = len(STATE.ric_item_exceptions)
+            STATE.ric_item_exceptions = [
+                item
+                for item in STATE.ric_item_exceptions
+                if not (
+                    normalize_sku(str(item.get("sku", ""))) == sku
+                    and str(item.get("scope", "")) == scope
+                )
+            ]
+            if len(STATE.ric_item_exceptions) == before:
+                self._send_json(
+                    {"ok": False, "error": "Eccezione non trovata."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            save_ric_item_exceptions(STATE.ric_item_exceptions)
+            self._send_json({"ok": True, "items": STATE.ric_item_exceptions})
+            return
+
+        if self.path == "/api/ric/item_exceptions/reset_all":
+            STATE.ric_item_exceptions = []
+            save_ric_item_exceptions(STATE.ric_item_exceptions)
+            self._send_json({"ok": True, "items": STATE.ric_item_exceptions})
             return
 
         if self.path == "/api/ric/save_overrides":

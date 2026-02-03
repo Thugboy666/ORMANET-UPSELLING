@@ -77,6 +77,10 @@ class UpsellRow:
     lm: float
     macro_categoria: str
     fixed_discount_percent: float
+    ric_base: float
+    ric_base_source: str
+    ric_floor_source: str
+    item_exception_hit: bool
     customer_base_price: float
     max_discount_real: float
     desired_discount_percent: float
@@ -145,6 +149,14 @@ def normalize_text(value: str) -> str:
     return text
 
 
+def normalize_sku(value: str) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().upper()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
 def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -187,24 +199,75 @@ def map_macro_category(raw_category: str, mapping: dict, logger: SessionLogger) 
     return "UNKNOWN"
 
 
-def get_ric_params(
-    macro: str, listino: str, sconti: dict, ric_overrides: dict[str, dict] | None = None
-) -> tuple[float, float, str]:
+def resolve_ric_values(
+    *,
+    macro: str,
+    listino: str,
+    sconti: dict,
+    ric_overrides: dict[str, dict] | None = None,
+    item_exceptions: list[dict] | None = None,
+    sku: str | None = None,
+) -> dict[str, object]:
     listino_key = LISTINO_MAP.get(listino.upper().strip(), "RIV")
+    listino_scope = "RIV10" if listino_key == "RIV+10" else listino_key
     defaults = sconti.get(macro, {}).get(listino_key, {})
     if "ric_base" not in defaults:
         raise ValueError(f"RIC.BASE mancante per {macro}/{listino_key}")
     ric_exact = float(defaults.get("ric", ABSOLUTE_MIN_MARKUP))
-    ric_floor = max(ABSOLUTE_MIN_MARKUP, ric_exact)
-    ric_base = float(defaults.get("ric_base"))
-    source = "default"
-    if ric_overrides:
-        override = ric_overrides.get(macro, {}).get(listino_key)
-        if override:
-            ric_floor = max(ric_floor, float(override.get("ric_floor", ric_floor)))
-            ric_base = float(override.get("ric_base", ric_base))
-            source = "override"
-    return ric_floor, ric_base, source
+    ric_floor_default = max(ABSOLUTE_MIN_MARKUP, ric_exact)
+    ric_floor = ric_floor_default
+    ric_floor_source = "default"
+    category_override = ric_overrides.get(macro, {}).get(listino_key) if ric_overrides else None
+    if category_override:
+        override_floor = float(category_override.get("ric_floor", ric_floor))
+        if override_floor > ric_floor:
+            ric_floor = override_floor
+            ric_floor_source = "category_override"
+    ric_base_default = float(defaults.get("ric_base"))
+    category_base = None
+    if category_override:
+        category_base = max(ric_floor, float(category_override.get("ric_base", ric_base_default)))
+
+    item_base = None
+    item_exception_hit = False
+    if item_exceptions and sku:
+        normalized_sku = normalize_sku(sku)
+        scoped_items = []
+        for entry in item_exceptions:
+            if normalize_sku(str(entry.get("sku", ""))) != normalized_sku:
+                continue
+            scope = str(entry.get("scope", "all")).upper()
+            scope = scope.replace("+", "")
+            if scope == "ALL":
+                scope = "ALL"
+            if scope in ("ALL", listino_scope):
+                scoped_items.append(entry)
+        scoped_items.sort(key=lambda item: 0 if str(item.get("scope", "")).upper() in ("ALL", "all") else 1)
+        if scoped_items:
+            item_exception_hit = True
+            item_base = float(scoped_items[-1].get("ric_base_override", 0.0))
+
+    candidates = [ric_floor, ric_base_default]
+    if category_base is not None:
+        candidates.append(category_base)
+    if item_base is not None:
+        candidates.append(item_base)
+    ric_base = max(candidates)
+
+    ric_base_source = "default"
+    if item_base is not None and item_base >= ric_base:
+        ric_base_source = "item_exception"
+    elif category_base is not None and category_base >= ric_base:
+        ric_base_source = "category_override"
+
+    return {
+        "listino_key": listino_key,
+        "ric_floor": ric_floor,
+        "ric_base": ric_base,
+        "ric_floor_source": ric_floor_source,
+        "ric_base_source": ric_base_source,
+        "item_exception_hit": item_exception_hit,
+    }
 
 
 def get_fixed_discount(macro: str, listino: str, sconti: dict) -> float:
@@ -312,6 +375,7 @@ def compute_upsell(
     logger: SessionLogger,
     overrides: dict[str, dict] | None = None,
     ric_overrides: dict[str, dict] | None = None,
+    item_exceptions: list[dict] | None = None,
 ) -> tuple[list[UpsellRow], dict, dict, list[str]]:
     suggestions: list[UpsellRow] = []
     trace_rows: list[dict] = []
@@ -334,9 +398,19 @@ def compute_upsell(
         macro = map_macro_category(item.categoria, category_map, logger)
         if macro == "UNKNOWN":
             raise ValueError(f"Categoria non riconosciuta: {item.categoria}")
-        ric_floor, ric_base, ric_source = get_ric_params(
-            macro, client.listino, sconti, ric_overrides
+        ric_values = resolve_ric_values(
+            macro=macro,
+            listino=client.listino,
+            sconti=sconti,
+            ric_overrides=ric_overrides,
+            item_exceptions=item_exceptions,
+            sku=item.codice,
         )
+        ric_floor = float(ric_values["ric_floor"])
+        ric_base = float(ric_values["ric_base"])
+        ric_floor_source = str(ric_values["ric_floor_source"])
+        ric_base_source = str(ric_values["ric_base_source"])
+        item_exception_hit = bool(ric_values["item_exception_hit"])
         fixed_discount = get_fixed_discount(macro, client.listino, sconti)
         lm_value, lm_source = resolve_lm(stock_item, item)
         if lm_value <= 0:
@@ -406,6 +480,10 @@ def compute_upsell(
                 lm=lm_value,
                 macro_categoria=macro,
                 fixed_discount_percent=fixed_discount,
+                ric_base=ric_base,
+                ric_base_source=ric_base_source,
+                ric_floor_source=ric_floor_source,
+                item_exception_hit=item_exception_hit,
                 customer_base_price=baseline_price,
                 max_discount_real=max_discount_real,
                 desired_discount_percent=desired_discount,
@@ -433,7 +511,9 @@ def compute_upsell(
                 "fixed_discount_percent": fixed_discount,
                 "ric_base": ric_base,
                 "ric_floor": ric_floor,
-                "ric_source": ric_source,
+                "ric_base_source": ric_base_source,
+                "ric_floor_source": ric_floor_source,
+                "item_exception_hit": item_exception_hit,
                 "baseline_price": baseline_price,
                 "floor_price": floor_price,
                 "max_discount_real": max_discount_real,
