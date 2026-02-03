@@ -76,3 +76,8 @@ Poi esegui:
 - Seleziona il cliente, l'ordine upsell e 4 storici (STORICO-*.xlsx).
 - Seleziona la causale e l'aggressività sconto.
 - Calcola l'upsell, copia i valori o esporta l'Excel in `output/preventivo.xlsx`.
+
+## Field mapping
+- Usa **Mappa campi** per verificare o modificare gli alias dei campi delle tabelle ORDINI, STOCK e CLIENTI.
+- **Salva mapping** scrive `config/field_mapping.json`; **Reset default** ripristina i valori di base.
+- **Test mapping** legge solo le intestazioni degli Excel selezionati e segnala eventuali campi obbligatori mancanti.

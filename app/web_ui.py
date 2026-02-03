@@ -120,6 +120,12 @@ HTML = """
         gap: 8px;
         margin-top: 16px;
       }
+      .actions.inline {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .mapping-button {
+        margin-top: 12px;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -142,6 +148,103 @@ HTML = """
       .info {
         color: #555;
         margin-top: 6px;
+      }
+      .modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+      .modal.active {
+        display: flex;
+      }
+      .modal-content {
+        background: var(--white);
+        width: min(900px, 92vw);
+        max-height: 90vh;
+        overflow: hidden;
+        border-radius: 10px;
+        display: flex;
+        flex-direction: column;
+      }
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 16px;
+        background: #fff4e8;
+        border-bottom: 1px solid #f0d6bf;
+      }
+      .modal-body {
+        padding: 16px;
+        overflow-y: auto;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .tab {
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+        background: #fff;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .tab.active {
+        background: var(--orange);
+        color: var(--black);
+      }
+      .mapping-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 12px;
+      }
+      .mapping-table th,
+      .mapping-table td {
+        border-bottom: 1px solid #eee;
+        padding: 6px 8px;
+        font-size: 13px;
+      }
+      .mapping-table th {
+        background: #fffaf5;
+      }
+      .mapping-table input {
+        width: 100%;
+        padding: 6px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+      }
+      .required-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        font-size: 11px;
+        border-radius: 10px;
+        background: #ffe0c2;
+        color: #7a2d00;
+        margin-left: 6px;
+      }
+      .mapping-results {
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      .mapping-results .missing {
+        color: #b10000;
+        font-weight: 600;
+      }
+      .mapping-results .ok {
+        color: #0a7d2c;
+        font-weight: 600;
+      }
+      .mapping-actions {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        margin-top: 8px;
       }
     </style>
   </head>
@@ -183,6 +286,9 @@ HTML = """
           <button id="exportBtn" class="secondary">Export Excel</button>
           <button id="openOutputBtn" class="secondary">Apri cartella output</button>
         </div>
+        <div class="actions">
+          <button id="mappingBtn" class="secondary">Mappa campi</button>
+        </div>
         <div class="error" id="errorBox"></div>
         <div class="info" id="infoBox"></div>
       </div>
@@ -205,6 +311,27 @@ HTML = """
         </table>
       </div>
     </div>
+    <div class="modal" id="mappingModal" aria-hidden="true">
+      <div class="modal-content">
+        <div class="modal-header">
+          <strong>Field Mapping</strong>
+          <button id="closeMapping" class="secondary">Chiudi</button>
+        </div>
+        <div class="modal-body">
+          <div class="tabs" id="mappingTabs"></div>
+          <div id="mappingFields"></div>
+          <div class="mapping-actions">
+            <button id="saveMapping">Salva mapping</button>
+            <button id="reloadMapping" class="secondary">Ricarica mapping</button>
+            <button id="resetMapping" class="secondary">Reset default</button>
+            <button id="testMapping" class="secondary">Test mapping</button>
+          </div>
+          <div class="mapping-results" id="mappingResults"></div>
+          <div class="error" id="mappingError"></div>
+          <div class="info" id="mappingInfo"></div>
+        </div>
+      </div>
+    </div>
     <script>
       const statusList = document.getElementById("statusList");
       const clientSelect = document.getElementById("clientSelect");
@@ -220,7 +347,28 @@ HTML = """
       const errorBox = document.getElementById("errorBox");
       const infoBox = document.getElementById("infoBox");
       const resultsBody = document.getElementById("resultsBody");
+      const mappingBtn = document.getElementById("mappingBtn");
+      const mappingModal = document.getElementById("mappingModal");
+      const closeMapping = document.getElementById("closeMapping");
+      const mappingTabs = document.getElementById("mappingTabs");
+      const mappingFields = document.getElementById("mappingFields");
+      const mappingResults = document.getElementById("mappingResults");
+      const mappingError = document.getElementById("mappingError");
+      const mappingInfo = document.getElementById("mappingInfo");
+      const saveMappingBtn = document.getElementById("saveMapping");
+      const reloadMappingBtn = document.getElementById("reloadMapping");
+      const resetMappingBtn = document.getElementById("resetMapping");
+      const testMappingBtn = document.getElementById("testMapping");
       let copyBlock = "";
+      let mappingData = {};
+      let activeMappingTab = "ORDINI";
+
+      const requiredFields = {
+        ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
+        STOCK: ["codice", "disp"],
+        CLIENTI: ["id", "ragione_sociale", "listino"]
+      };
+      const stockListinoGroup = ["listino_ri", "listino_ri10", "listino_di"];
 
       function setError(message) {
         errorBox.textContent = message || "";
@@ -237,6 +385,137 @@ HTML = """
           body: JSON.stringify(payload || {})
         });
         return res.json();
+      }
+
+      function setMappingError(message) {
+        mappingError.textContent = message || "";
+      }
+
+      function setMappingInfo(message) {
+        mappingInfo.textContent = message || "";
+      }
+
+      function setMappingResults(html) {
+        mappingResults.innerHTML = html || "";
+      }
+
+      function openMappingModal() {
+        mappingModal.classList.add("active");
+        mappingModal.setAttribute("aria-hidden", "false");
+      }
+
+      function closeMappingModal() {
+        mappingModal.classList.remove("active");
+        mappingModal.setAttribute("aria-hidden", "true");
+      }
+
+      function renderMappingTabs() {
+        mappingTabs.innerHTML = "";
+        Object.keys(mappingData).forEach((key) => {
+          const btn = document.createElement("button");
+          btn.className = "tab" + (key === activeMappingTab ? " active" : "");
+          btn.textContent = key;
+          btn.addEventListener("click", () => {
+            collectMappingFromUI();
+            activeMappingTab = key;
+            renderMappingTabs();
+            renderMappingFields();
+            setMappingResults("");
+          });
+          mappingTabs.appendChild(btn);
+        });
+      }
+
+      function renderMappingFields() {
+        mappingFields.innerHTML = "";
+        const section = mappingData[activeMappingTab] || {};
+        const table = document.createElement("table");
+        table.className = "mapping-table";
+        table.innerHTML = `
+          <thead>
+            <tr>
+              <th>Campo logico</th>
+              <th>Alias (separati da virgola)</th>
+            </tr>
+          </thead>
+        `;
+        const tbody = document.createElement("tbody");
+        Object.keys(section).forEach((field) => {
+          const tr = document.createElement("tr");
+          const labelCell = document.createElement("td");
+          const label = document.createElement("span");
+          label.textContent = field;
+          if (requiredFields[activeMappingTab]?.includes(field)) {
+            const badge = document.createElement("span");
+            badge.className = "required-badge";
+            badge.textContent = "Required";
+            labelCell.appendChild(label);
+            labelCell.appendChild(badge);
+          } else if (activeMappingTab === "STOCK" && stockListinoGroup.includes(field)) {
+            const badge = document.createElement("span");
+            badge.className = "required-badge";
+            badge.textContent = "Required (uno tra listini)";
+            labelCell.appendChild(label);
+            labelCell.appendChild(badge);
+          } else {
+            labelCell.appendChild(label);
+          }
+          const inputCell = document.createElement("td");
+          const input = document.createElement("input");
+          input.type = "text";
+          input.dataset.mappingField = field;
+          input.value = (section[field] || []).join(", ");
+          inputCell.appendChild(input);
+          tr.appendChild(labelCell);
+          tr.appendChild(inputCell);
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        mappingFields.appendChild(table);
+      }
+
+      function collectMappingFromUI() {
+        const section = mappingData[activeMappingTab] || {};
+        const inputs = mappingFields.querySelectorAll("input[data-mapping-field]");
+        inputs.forEach((input) => {
+          const field = input.dataset.mappingField;
+          if (!field) {
+            return;
+          }
+          const aliases = input.value
+            .split(",")
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0);
+          section[field] = aliases;
+        });
+        mappingData[activeMappingTab] = section;
+      }
+
+      function buildTestResults(results) {
+        let html = "";
+        Object.keys(results).forEach((sectionKey) => {
+          const items = results[sectionKey] || [];
+          if (!items.length) {
+            return;
+          }
+          html += `<div><strong>${sectionKey}</strong></div>`;
+          items.forEach((item) => {
+            html += `<div>File: <strong>${item.file}</strong></div>`;
+            const missing = item.missing_required || [];
+            if (missing.length) {
+              html += `<div class="missing">Mancanti: ${missing.join(", ")}</div>`;
+            } else {
+              html += `<div class="ok">Tutti i campi richiesti trovati</div>`;
+            }
+            html += "<ul>";
+            Object.keys(item.matches || {}).forEach((field) => {
+              const match = item.matches[field] || "NOT FOUND";
+              html += `<li>${field}: ${match}</li>`;
+            });
+            html += "</ul>";
+          });
+        });
+        return html;
       }
 
       function renderStatus(status) {
@@ -356,7 +635,7 @@ HTML = """
         setError("");
         const res = await api("/api/load");
         if (!res.success) {
-          setError(res.error || "Errore caricamento default");
+          setError(res.message || res.error || "Errore caricamento default");
         } else {
           setInfo(res.message || "Caricamento completato");
         }
@@ -390,7 +669,7 @@ HTML = """
         setInfo("");
         const res = await api("/api/compute");
         if (!res.success) {
-          setError(res.error || "Errore calcolo");
+          setError(res.message || res.error || "Errore calcolo");
           return;
         }
         copyBlock = res.copy_block || "";
@@ -424,6 +703,80 @@ HTML = """
 
       openOutputBtn.addEventListener("click", async () => {
         await api("/api/open_output");
+      });
+
+      mappingBtn.addEventListener("click", async () => {
+        setMappingError("");
+        setMappingInfo("");
+        setMappingResults("");
+        const res = await api("/api/mapping/get");
+        if (!res.ok) {
+          setMappingError(res.message || "Errore caricamento mapping");
+          return;
+        }
+        mappingData = res.mapping || {};
+        activeMappingTab = Object.keys(mappingData)[0] || "ORDINI";
+        renderMappingTabs();
+        renderMappingFields();
+        openMappingModal();
+      });
+
+      closeMapping.addEventListener("click", () => {
+        closeMappingModal();
+      });
+
+      saveMappingBtn.addEventListener("click", async () => {
+        setMappingError("");
+        setMappingInfo("");
+        collectMappingFromUI();
+        const res = await api("/api/mapping/save", { mapping: mappingData });
+        if (!res.ok) {
+          setMappingError(res.message || "Errore salvataggio mapping");
+          return;
+        }
+        mappingData = res.mapping || mappingData;
+        setMappingInfo("Mapping salvato");
+      });
+
+      reloadMappingBtn.addEventListener("click", async () => {
+        setMappingError("");
+        setMappingInfo("");
+        const res = await api("/api/mapping/load");
+        if (!res.ok) {
+          setMappingError(res.message || "Errore ricarica mapping");
+          return;
+        }
+        mappingData = res.mapping || {};
+        renderMappingTabs();
+        renderMappingFields();
+        setMappingInfo("Mapping ricaricato");
+      });
+
+      resetMappingBtn.addEventListener("click", async () => {
+        setMappingError("");
+        setMappingInfo("");
+        const res = await api("/api/mapping/reset");
+        if (!res.ok) {
+          setMappingError(res.message || "Errore reset mapping");
+          return;
+        }
+        mappingData = res.mapping || {};
+        renderMappingTabs();
+        renderMappingFields();
+        setMappingInfo("Mapping resettato ai default");
+      });
+
+      testMappingBtn.addEventListener("click", async () => {
+        setMappingError("");
+        setMappingInfo("");
+        collectMappingFromUI();
+        const res = await api("/api/mapping/test", { mapping: mappingData });
+        if (!res.ok) {
+          setMappingError(res.message || "Errore test mapping");
+          setMappingResults(buildTestResults(res.results || {}));
+          return;
+        }
+        setMappingResults(buildTestResults(res.results || {}));
       });
 
       refreshStatus();
