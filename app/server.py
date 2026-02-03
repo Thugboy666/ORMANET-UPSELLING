@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.engine import (
+    ABSOLUTE_MIN_MARKUP,
     CAUSALI,
     ClientInfo,
     DEFAULT_AGGRESSIVITY,
@@ -25,8 +26,8 @@ from app.engine import (
     UpsellRow,
     compute_upsell,
     export_excel,
-    get_required_ric,
     get_fixed_discount,
+    get_ric_params,
     load_json,
     map_macro_category,
 )
@@ -52,6 +53,7 @@ OUTPUT_DIR = BASE_DIR / "output"
 CONFIG_DIR = BASE_DIR / "config"
 LOGS_DIR = BASE_DIR / "logs"
 MAPPING_PATH = CONFIG_DIR / "field_mapping.json"
+RIC_OVERRIDES_PATH = CONFIG_DIR / "ric_overrides.json"
 
 
 @dataclass
@@ -71,6 +73,8 @@ class AppState:
     validation: dict = field(default_factory=lambda: {"ok": True, "errors": []})
     warnings: list[str] = field(default_factory=list)
     copy_block: str = ""
+    ric_overrides: dict[str, dict] = field(default_factory=dict)
+    ric_override_errors: list[str] = field(default_factory=list)
 
     def reset_results(self) -> None:
         self.upsell_rows = []
@@ -135,10 +139,130 @@ def validate_mapping(mapping: Any) -> None:
 STATE.field_mapping = load_mapping_file()
 
 
+def load_ric_overrides() -> dict[str, dict]:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not RIC_OVERRIDES_PATH.exists():
+        data = {"overrides": {}}
+        save_ric_overrides(data)
+        return data["overrides"]
+    with RIC_OVERRIDES_PATH.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    return raw.get("overrides", {})
+
+
+def save_ric_overrides(payload: dict[str, Any]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with RIC_OVERRIDES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def validate_ric_overrides(sconti: dict, overrides: dict[str, dict]) -> list[str]:
+    errors: list[str] = []
+    for macro, listini in overrides.items():
+        for listino_key, values in listini.items():
+            defaults = sconti.get(macro, {}).get(listino_key)
+            if not defaults:
+                errors.append(f"Override non valida: {macro}/{listino_key} non trovato in SCONTI 2026")
+                continue
+            ric_exact = float(defaults.get("ric", 0.0))
+            ric_floor_min = max(ABSOLUTE_MIN_MARKUP, ric_exact)
+            ric_floor = float(values.get("ric_floor", ric_floor_min))
+            ric_base = float(values.get("ric_base", ric_floor))
+            if ric_floor < ric_floor_min:
+                errors.append(
+                    f"Override {macro}/{listino_key}: RIC {ric_floor:.2f}% sotto il minimo {ric_floor_min:.2f}%"
+                )
+            if ric_base < ric_floor:
+                errors.append(
+                    f"Override {macro}/{listino_key}: RIC.BASE {ric_base:.2f}% < RIC {ric_floor:.2f}%"
+                )
+    return errors
+
+
+STATE.ric_overrides = load_ric_overrides()
+
+
+def refresh_ric_override_errors() -> None:
+    try:
+        sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+    except Exception:
+        STATE.ric_override_errors = ["Errore caricamento SCONTI 2026"]
+        return
+    STATE.ric_override_errors = validate_ric_overrides(sconti, STATE.ric_overrides)
+
+
+refresh_ric_override_errors()
+
+
 def list_orders() -> dict[str, list[str]]:
     storico = sorted([path.name for path in ORDERS_DIR.glob("STORICO-*.xlsx")])
     upsell = sorted([path.name for path in ORDERS_DIR.glob("UPSELL-*.xlsx")])
     return {"storico": storico, "upsell": upsell}
+
+
+def build_pricing_limits(trace: dict) -> dict[str, float | None]:
+    rows = trace.get("rows", []) if isinstance(trace, dict) else []
+    if not rows:
+        return {
+            "max_discount_real_min": None,
+            "max_discount_real_max": None,
+            "buffer_ric_example": None,
+        }
+    max_discounts = [float(row.get("max_discount_real", 0.0)) for row in rows]
+    buffer_values = [float(row.get("buffer_ric", 0.0)) for row in rows]
+    return {
+        "max_discount_real_min": min(max_discounts),
+        "max_discount_real_max": max(max_discounts),
+        "buffer_ric_example": buffer_values[0] if buffer_values else None,
+    }
+
+
+def build_ric_table(sconti: dict, overrides: dict[str, dict]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for macro, listini in sconti.items():
+        for listino_key, values in listini.items():
+            ric_base_default = values.get("ric_base")
+            ric_floor_default = values.get("ric")
+            if ric_base_default is None:
+                continue
+            ric_floor_min = max(ABSOLUTE_MIN_MARKUP, float(ric_floor_default))
+            override = overrides.get(macro, {}).get(listino_key, {})
+            ric_base = float(override.get("ric_base", ric_base_default))
+            ric_floor = float(override.get("ric_floor", ric_floor_default))
+            source = "override" if override else "default"
+            note = override.get("note", "")
+            rows.append(
+                {
+                    "categoria": macro,
+                    "listino": listino_key,
+                    "ric_base": ric_base,
+                    "ric_floor": ric_floor,
+                    "ric_base_default": ric_base_default,
+                    "ric_floor_default": ric_floor_default,
+                    "ric_floor_min": ric_floor_min,
+                    "source": source,
+                    "note": note,
+                    "note_default": "",
+                }
+            )
+    return rows
+
+
+def build_ric_example(trace: dict) -> str:
+    rows = trace.get("rows", []) if isinstance(trace, dict) else []
+    if not rows:
+        return "Esempio: LM 0,00 – RIC.BASE 0% -> 0,00; RIC 0% -> 0,00; sconto max reale ~ 0,0%."
+    row = rows[0]
+    lm = float(row.get("lm", 0.0))
+    ric_base = float(row.get("ric_base", 0.0))
+    ric_floor = float(row.get("ric_floor", 0.0))
+    baseline = float(row.get("baseline_price", 0.0))
+    floor = float(row.get("floor_price", 0.0))
+    max_discount = float(row.get("max_discount_real", 0.0))
+    return (
+        f"Esempio: LM {lm:.2f} – RIC.BASE {ric_base:.0f}% -> {baseline:.2f}; "
+        f"RIC {ric_floor:.0f}% -> {floor:.2f}; sconto max reale ~ {max_discount:.1f}%."
+    )
 
 
 def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str, causale: str) -> str:
@@ -170,6 +294,7 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "macro_categoria": row.macro_categoria,
             "fixed_discount_percent": row.fixed_discount_percent,
             "customer_base_price": row.customer_base_price,
+            "max_discount_real": row.max_discount_real,
             "desired_discount_percent": row.desired_discount_percent,
             "applied_discount_percent": row.applied_discount_percent,
             "final_ric_percent": row.final_ric_percent,
@@ -216,6 +341,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path == "/api/status":
+            refresh_ric_override_errors()
             orders = list_orders()
             histories_selected = [path.name for path in STATE.histories]
             histories_count = len(histories_selected)
@@ -253,6 +379,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "rounding": STATE.pricing.rounding,
                     },
                     "validation_ok": STATE.validation.get("ok", True),
+                    "ric_overrides_ok": len(STATE.ric_override_errors) == 0,
+                    "ric_override_errors": STATE.ric_override_errors,
                 }
             )
             return
@@ -414,6 +542,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 sconti = load_json(CONFIG_DIR / "sconti_2026.json")
                 category_map = load_json(CONFIG_DIR / "category_map.json")
+                refresh_ric_override_errors()
                 historical_items = load_orders(
                     STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
                 )
@@ -442,7 +571,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     causale=STATE.causale or CAUSALI[0],
                     logger=STATE.logger,
                     overrides=STATE.per_row_overrides,
+                    ric_overrides=STATE.ric_overrides,
                 )
+                pricing_limits = build_pricing_limits(STATE.trace)
+                if pricing_limits.get("buffer_ric_example") is not None:
+                    STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
                 STATE.copy_block = build_copy_block(
                     STATE.upsell_rows, client, order_name, STATE.causale or ""
@@ -455,6 +588,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "trace": STATE.trace,
                         "warnings": STATE.warnings,
                         "validation": STATE.validation,
+                        "ric_override_errors": STATE.ric_override_errors,
                         "copy_block": STATE.copy_block,
                         "pricing": {
                             "aggressivity": STATE.pricing.aggressivity,
@@ -463,6 +597,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             "buffer_ric": STATE.pricing.buffer_ric,
                             "rounding": STATE.pricing.rounding,
                         },
+                        "pricing_limits": pricing_limits,
                     }
                 )
             except (MappingError, DataError) as exc:
@@ -518,6 +653,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     STATE.per_row_overrides = overrides
                 sconti = load_json(CONFIG_DIR / "sconti_2026.json")
                 category_map = load_json(CONFIG_DIR / "category_map.json")
+                refresh_ric_override_errors()
                 historical_items = load_orders(
                     STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
                 )
@@ -538,7 +674,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     causale=STATE.causale or CAUSALI[0],
                     logger=STATE.logger,
                     overrides=STATE.per_row_overrides,
+                    ric_overrides=STATE.ric_overrides,
                 )
+                pricing_limits = build_pricing_limits(STATE.trace)
+                if pricing_limits.get("buffer_ric_example") is not None:
+                    STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
                 STATE.copy_block = build_copy_block(
                     STATE.upsell_rows, client, order_name, STATE.causale or ""
@@ -550,7 +690,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "trace": STATE.trace,
                         "warnings": STATE.warnings,
                         "validation": STATE.validation,
+                        "ric_override_errors": STATE.ric_override_errors,
                         "copy_block": STATE.copy_block,
+                        "pricing_limits": pricing_limits,
                     }
                 )
             except Exception as exc:
@@ -591,21 +733,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
-                required_ric = get_required_ric(macro, client.listino, sconti)
+                ric_floor, ric_base, ric_source = get_ric_params(
+                    macro, client.listino, sconti, STATE.ric_overrides
+                )
                 if stock_item.lm <= 0:
                     raise ValueError("LM mancante")
                 fixed_discount = get_fixed_discount(macro, client.listino, sconti)
-                customer_base_price = stock_item.lm * (1 - fixed_discount / 100)
-                min_unit_price = stock_item.lm * (1 + required_ric / 100)
+                baseline_price = stock_item.lm * (1 + ric_base / 100)
+                min_unit_price = stock_item.lm * (1 + ric_floor / 100)
+                max_discount_real = (
+                    1 - (min_unit_price / baseline_price) if baseline_price else 0.0
+                ) * 100
                 self._send_json(
                     {
                         "ok": True,
                         "sku": sku,
                         "min_unit_price": min_unit_price,
-                        "required_ric": required_ric,
+                        "required_ric": ric_floor,
                         "lm": stock_item.lm,
                         "fixed_discount_percent": fixed_discount,
-                        "customer_base_price": customer_base_price,
+                        "customer_base_price": baseline_price,
+                        "ric_base": ric_base,
+                        "ric_source": ric_source,
+                        "max_discount_real": max_discount_real,
                     }
                 )
             except Exception as exc:
@@ -619,6 +769,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not STATE.upsell_rows:
                 self._send_json(
                     {"success": False, "error": "Nessuna riga da esportare."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            if STATE.ric_override_errors:
+                self._send_json(
+                    {
+                        "success": False,
+                        "error": "Override RIC non valide: correggi prima dell'export.",
+                    },
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
@@ -778,6 +937,89 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"ok": True, "results": results})
+            return
+
+        if self.path == "/api/ric/get_overrides":
+            try:
+                sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+                refresh_ric_override_errors()
+                rows = build_ric_table(sconti, STATE.ric_overrides)
+                example = build_ric_example(STATE.trace)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "rows": rows,
+                        "example": example,
+                        "override_errors": STATE.ric_override_errors,
+                    }
+                )
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": f"Errore caricamento RIC: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+
+        if self.path == "/api/ric/save_overrides":
+            incoming = payload.get("overrides", [])
+            if not isinstance(incoming, list):
+                self._send_json(
+                    {"ok": False, "error": "Formato override non valido"},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+                new_overrides: dict[str, dict] = {}
+                for row in incoming:
+                    macro = row.get("categoria")
+                    listino = row.get("listino")
+                    if not macro or not listino:
+                        continue
+                    new_overrides.setdefault(macro, {})[listino] = {
+                        "ric_base": float(row.get("ric_base")),
+                        "ric_floor": float(row.get("ric_floor")),
+                        "note": row.get("note", ""),
+                    }
+                errors = validate_ric_overrides(sconti, new_overrides)
+                if errors:
+                    self._send_json(
+                        {"ok": False, "error": "override_invalid", "details": errors},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                STATE.ric_overrides = new_overrides
+                save_ric_overrides({"overrides": STATE.ric_overrides})
+                refresh_ric_override_errors()
+                self._send_json({"ok": True, "overrides": STATE.ric_overrides})
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": f"Errore salvataggio RIC: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+
+        if self.path == "/api/ric/reset_overrides":
+            try:
+                macro = payload.get("categoria")
+                listino = payload.get("listino")
+                if macro and listino:
+                    if macro in STATE.ric_overrides:
+                        STATE.ric_overrides.get(macro, {}).pop(listino, None)
+                        if not STATE.ric_overrides.get(macro):
+                            STATE.ric_overrides.pop(macro, None)
+                elif macro:
+                    STATE.ric_overrides.pop(macro, None)
+                else:
+                    STATE.ric_overrides = {}
+                save_ric_overrides({"overrides": STATE.ric_overrides})
+                refresh_ric_override_errors()
+                self._send_json({"ok": True, "overrides": STATE.ric_overrides})
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": f"Errore reset RIC: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
