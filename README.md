@@ -76,6 +76,8 @@ Poi esegui:
 - Seleziona il cliente, l'ordine upsell e 4 storici (STORICO-*.xlsx).
 - Seleziona la causale e l'aggressività sconto.
 - Calcola l'upsell, copia i valori o esporta l'Excel in `output/preventivo.xlsx`.
+- **PREZZO_ALT**: prezzo promo ex IVA (solo articoli altovendenti).
+- **Modalità ALTOVENDENTI**: attiva manualmente il prezzo promo senza applicare sconti.
 
 ## Field mapping
 - Usa **Mappa campi** per verificare o modificare gli alias dei campi delle tabelle ORDINI, STOCK e CLIENTI.
