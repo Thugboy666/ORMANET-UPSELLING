@@ -83,8 +83,11 @@ class UpsellRow:
     item_exception_hit: bool
     customer_base_price: float
     max_discount_real: float
-    desired_discount_percent: float
-    applied_discount_percent: float
+    max_discount_real_pct: float
+    max_discount_effective: float
+    max_discount_effective_pct: float
+    desired_discount_pct: float
+    applied_discount_pct: float
     final_ric_percent: float
     clamp_reason: str | None
     min_unit_price: float
@@ -98,7 +101,7 @@ class UpsellRow:
 class PricingParams:
     aggressivity: float = DEFAULT_AGGRESSIVITY
     aggressivity_mode: str = AGGRESSIVITY_MODES[0]
-    max_discount_percent: float = DEFAULT_MAX_DISCOUNT
+    max_discount_percent: float | None = DEFAULT_MAX_DISCOUNT
     buffer_ric: float = DEFAULT_BUFFER_RIC
     rounding: float | None = DEFAULT_ROUNDING
 
@@ -315,14 +318,16 @@ def apply_pricing_pipeline(
     floor_price = lm * (1 + ric_floor / 100)
     max_discount_real = 1 - (floor_price / baseline_price) if baseline_price else 0.0
     max_discount_real = max(0.0, max_discount_real)
-    max_discount_ui = max_discount_percent if max_discount_percent is not None else max_discount_real * 100
-    max_discount_effective = min(max_discount_real * 100, float(max_discount_ui))
+    max_discount_real_pct = max_discount_real * 100
+    max_discount_ui = max_discount_percent if max_discount_percent is not None else max_discount_real_pct
+    max_discount_effective_pct = min(max_discount_real_pct, float(max_discount_ui))
+    max_discount_effective = max_discount_effective_pct / 100
 
     aggressivity_value = aggressivity_to_discount_percent(aggressivity)
-    desired_discount_percent = (aggressivity_value / 100) * max_discount_effective
+    desired_discount_pct = (aggressivity_value / 100) * max_discount_effective_pct
     if discount_override is not None:
-        desired_discount_percent = float(discount_override)
-    candidate_price = baseline_price * (1 - desired_discount_percent / 100)
+        desired_discount_pct = float(discount_override)
+    candidate_price = baseline_price * (1 - desired_discount_pct / 100)
     clamp_reason = None
     if candidate_price < floor_price:
         candidate_price = floor_price
@@ -340,13 +345,15 @@ def apply_pricing_pipeline(
     payload = {
         "baseline_price": baseline_price,
         "floor_price": floor_price,
-        "max_discount_real": max_discount_real * 100,
+        "max_discount_real": max_discount_real,
+        "max_discount_real_pct": max_discount_real_pct,
         "max_discount_effective": max_discount_effective,
-        "desired_discount_percent": desired_discount_percent,
+        "max_discount_effective_pct": max_discount_effective_pct,
+        "desired_discount_pct": desired_discount_pct,
         "candidate_price": candidate_price,
         "final_price": final_price,
         "final_ric": final_ric,
-        "applied_discount": applied_discount,
+        "applied_discount_pct": applied_discount,
     }
     return payload, clamp_reason
 
@@ -427,12 +434,14 @@ def compute_upsell(
         baseline_price = pricing_payload["baseline_price"]
         floor_price = pricing_payload["floor_price"]
         max_discount_real = pricing_payload["max_discount_real"]
+        max_discount_real_pct = pricing_payload["max_discount_real_pct"]
         max_discount_effective = pricing_payload["max_discount_effective"]
-        desired_discount = pricing_payload["desired_discount_percent"]
+        max_discount_effective_pct = pricing_payload["max_discount_effective_pct"]
+        desired_discount_pct = pricing_payload["desired_discount_pct"]
         candidate_price = pricing_payload["candidate_price"]
         computed_price = pricing_payload["final_price"]
         final_ric = pricing_payload["final_ric"]
-        applied_discount = pricing_payload["applied_discount"]
+        applied_discount_pct = pricing_payload["applied_discount_pct"]
         buffer_ric = ric_base - ric_floor
         override = overrides.get(item.codice, {})
         qty_override = override.get("qty")
@@ -449,10 +458,10 @@ def compute_upsell(
                 rounding=pricing.rounding,
                 discount_override=discount_override,
             )
-            desired_discount = pricing_payload["desired_discount_percent"]
+            desired_discount_pct = pricing_payload["desired_discount_pct"]
             computed_price = pricing_payload["final_price"]
             final_ric = pricing_payload["final_ric"]
-            applied_discount = pricing_payload["applied_discount"]
+            applied_discount_pct = pricing_payload["applied_discount_pct"]
             candidate_price = pricing_payload["candidate_price"]
 
         final_price = computed_price
@@ -466,7 +475,7 @@ def compute_upsell(
                 final_price = round_up_to_step(floor_price, pricing.rounding)
                 clamp_reason = "MIN_RIC_FLOOR"
             final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
-            applied_discount = (
+            applied_discount_pct = (
                 (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
             )
 
@@ -486,8 +495,11 @@ def compute_upsell(
                 item_exception_hit=item_exception_hit,
                 customer_base_price=baseline_price,
                 max_discount_real=max_discount_real,
-                desired_discount_percent=desired_discount,
-                applied_discount_percent=applied_discount,
+                max_discount_real_pct=max_discount_real_pct,
+                max_discount_effective=max_discount_effective,
+                max_discount_effective_pct=max_discount_effective_pct,
+                desired_discount_pct=desired_discount_pct,
+                applied_discount_pct=applied_discount_pct,
                 final_ric_percent=final_ric,
                 clamp_reason=clamp_reason,
                 min_unit_price=floor_price,
@@ -517,16 +529,18 @@ def compute_upsell(
                 "baseline_price": baseline_price,
                 "floor_price": floor_price,
                 "max_discount_real": max_discount_real,
+                "max_discount_real_pct": max_discount_real_pct,
                 "max_discount_effective": max_discount_effective,
+                "max_discount_effective_pct": max_discount_effective_pct,
                 "buffer_ric": buffer_ric,
                 "aggressivity": pricing.aggressivity,
                 "aggressivity_mode": pricing.aggressivity_mode,
                 "max_discount_percent": pricing.max_discount_percent,
                 "discount_override": discount_override,
                 "unit_price_override": unit_price_override,
-                "desired_discount_percent": desired_discount,
-                "capped_discount_percent": max_discount_effective,
-                "applied_discount_percent": applied_discount,
+                "desired_discount_pct": desired_discount_pct,
+                "capped_discount_pct": max_discount_effective_pct,
+                "applied_discount_pct": applied_discount_pct,
                 "clamp_reason": clamp_reason,
                 "candidate_price": candidate_price,
                 "final_price": final_price,
@@ -544,7 +558,7 @@ def compute_upsell(
                 "formula": (
                     f"Baseline = LM * (1 + {ric_base:.2f}%) = {baseline_price:.2f}; "
                     f"Floor = LM * (1 + {ric_floor:.2f}%) = {floor_price:.2f}; "
-                    f"Prezzo finale = max(Baseline * (1 - {desired_discount:.2f}%), Floor)"
+                    f"Prezzo finale = max(Baseline * (1 - {desired_discount_pct:.2f}%), Floor)"
                 ),
             }
         )
@@ -651,7 +665,7 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
             row.lm,
             row.fixed_discount_percent,
             row.customer_base_price,
-            row.desired_discount_percent,
+            row.desired_discount_pct,
             row.prezzo_unit,
             row.final_ric_percent,
             row.required_ric,

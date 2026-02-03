@@ -308,6 +308,17 @@ def list_orders() -> dict[str, list[str]]:
     return {"storico": storico, "upsell": upsell}
 
 
+def sanitize_max_discount_percent(
+    max_discount_percent: float | None, allowed_percent: float | None
+) -> tuple[float | None, float | None]:
+    if allowed_percent is None:
+        return max_discount_percent, allowed_percent
+    if max_discount_percent is None:
+        return allowed_percent, allowed_percent
+    capped = min(max(float(max_discount_percent), 0.0), float(allowed_percent))
+    return capped, allowed_percent
+
+
 def build_pricing_limits(trace: dict) -> dict[str, float | None]:
     rows = trace.get("rows", []) if isinstance(trace, dict) else []
     if not rows:
@@ -316,7 +327,9 @@ def build_pricing_limits(trace: dict) -> dict[str, float | None]:
             "max_discount_real_max": None,
             "buffer_ric_example": None,
         }
-    max_discounts = [float(row.get("max_discount_real", 0.0)) for row in rows]
+    max_discounts = [
+        float(row.get("max_discount_real_pct", row.get("max_discount_real", 0.0))) for row in rows
+    ]
     buffer_values = [float(row.get("buffer_ric", 0.0)) for row in rows]
     return {
         "max_discount_real_min": min(max_discounts),
@@ -366,7 +379,7 @@ def build_ric_example(trace: dict) -> str:
     ric_floor = float(row.get("ric_floor", 0.0))
     baseline = float(row.get("baseline_price", 0.0))
     floor = float(row.get("floor_price", 0.0))
-    max_discount = float(row.get("max_discount_real", 0.0))
+    max_discount = float(row.get("max_discount_real_pct", row.get("max_discount_real", 0.0)))
     return (
         f"Esempio: LM {lm:.2f} – RIC.BASE {ric_base:.0f}% -> {baseline:.2f}; "
         f"RIC minimo {ric_floor:.0f}% -> {floor:.2f}; sconto massimo consentito ~ {max_discount:.1f}%."
@@ -383,7 +396,7 @@ def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str,
     for row in rows:
         lines.append(
             f"- {row.codice} | {row.descrizione} | {row.qty} | LM {row.lm:.2f} | "
-            f"Sconto% {row.desired_discount_percent:.2f} | Prezzo {row.prezzo_unit:.2f} | "
+            f"Sconto% {row.desired_discount_pct:.2f} | Prezzo {row.prezzo_unit:.2f} | "
             f"Ric% {row.final_ric_percent:.2f} | "
             f"Ric min% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
             f"Disponibile dal {row.disponibile_dal or '-'} | Note {row.clamp_reason or '-'}"
@@ -407,8 +420,11 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "item_exception_hit": row.item_exception_hit,
             "customer_base_price": row.customer_base_price,
             "max_discount_real": row.max_discount_real,
-            "desired_discount_percent": row.desired_discount_percent,
-            "applied_discount_percent": row.applied_discount_percent,
+            "max_discount_real_pct": row.max_discount_real_pct,
+            "max_discount_effective": row.max_discount_effective,
+            "max_discount_effective_pct": row.max_discount_effective_pct,
+            "desired_discount_pct": row.desired_discount_pct,
+            "applied_discount_pct": row.applied_discount_pct,
             "final_ric_percent": row.final_ric_percent,
             "required_ric": row.required_ric,
             "totale": row.totale,
@@ -668,7 +684,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 STATE.pricing = PricingParams(
                     aggressivity=DEFAULT_AGGRESSIVITY,
                     aggressivity_mode="discount_from_baseline",
-                    max_discount_percent=DEFAULT_MAX_DISCOUNT,
+                    max_discount_percent=None,
                     buffer_ric=DEFAULT_BUFFER_RIC,
                     rounding=DEFAULT_ROUNDING,
                 )
@@ -687,6 +703,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                     item_exceptions=STATE.ric_item_exceptions,
                 )
                 pricing_limits = build_pricing_limits(STATE.trace)
+                allowed_cap = pricing_limits.get("max_discount_real_min")
+                capped_value, _ = sanitize_max_discount_percent(None, allowed_cap)
+                STATE.pricing.max_discount_percent = capped_value
+                if STATE.trace.get("global", {}).get("pricing") is not None:
+                    STATE.trace["global"]["pricing"]["max_discount_percent"] = capped_value
                 if pricing_limits.get("buffer_ric_example") is not None:
                     STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
@@ -711,6 +732,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             "rounding": STATE.pricing.rounding,
                         },
                         "pricing_limits": pricing_limits,
+                        "global_max_sconto_allowed_pct": allowed_cap,
+                        "global_max_sconto_used_pct": capped_value,
                     }
                 )
             except (MappingError, DataError) as exc:
@@ -751,14 +774,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                         rounding_value = None
                     else:
                         rounding_value = float(rounding_value)
+                    raw_max_discount = global_params.get("max_discount_percent")
+                    max_discount_value = None if raw_max_discount in ("", None) else float(raw_max_discount)
                     STATE.pricing = PricingParams(
                         aggressivity=float(global_params.get("aggressivity", STATE.pricing.aggressivity)),
                         aggressivity_mode=global_params.get(
                             "aggressivity_mode", STATE.pricing.aggressivity_mode
                         ),
-                        max_discount_percent=float(
-                            global_params.get("max_discount_percent", STATE.pricing.max_discount_percent)
-                        ),
+                        max_discount_percent=max_discount_value,
                         buffer_ric=float(global_params.get("buffer_ric", STATE.pricing.buffer_ric)),
                         rounding=rounding_value,
                     )
@@ -791,6 +814,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                     item_exceptions=STATE.ric_item_exceptions,
                 )
                 pricing_limits = build_pricing_limits(STATE.trace)
+                allowed_cap = pricing_limits.get("max_discount_real_min")
+                capped_value, _ = sanitize_max_discount_percent(
+                    STATE.pricing.max_discount_percent, allowed_cap
+                )
+                STATE.pricing.max_discount_percent = capped_value
+                if STATE.trace.get("global", {}).get("pricing") is not None:
+                    STATE.trace["global"]["pricing"]["max_discount_percent"] = capped_value
                 if pricing_limits.get("buffer_ric_example") is not None:
                     STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
@@ -807,6 +837,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "ric_override_errors": STATE.ric_override_errors,
                         "copy_block": STATE.copy_block,
                         "pricing_limits": pricing_limits,
+                        "global_max_sconto_allowed_pct": allowed_cap,
+                        "global_max_sconto_used_pct": capped_value,
                     }
                 )
             except Exception as exc:
@@ -881,7 +913,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "ric_base_source": ric_base_source,
                         "ric_floor_source": ric_floor_source,
                         "item_exception_hit": item_exception_hit,
-                        "max_discount_real": max_discount_real,
+                        "max_discount_real_pct": max_discount_real,
                     }
                 )
             except Exception as exc:

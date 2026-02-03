@@ -475,6 +475,9 @@ HTML = """
             </label>
             <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
             <div class="info" id="maxDiscountHint"></div>
+            <div class="actions inline">
+              <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
+            </div>
           </div>
           <div>
             <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
@@ -682,6 +685,7 @@ HTML = """
       const bufferRicOverrideToggle = document.getElementById("bufferRicOverrideToggle");
       const maxDiscount = document.getElementById("maxDiscount");
       const maxDiscountHint = document.getElementById("maxDiscountHint");
+      const resetMaxDiscount = document.getElementById("resetMaxDiscount");
       const roundingMode = document.getElementById("roundingMode");
       const recalcBtn = document.getElementById("recalcBtn");
       const resetOverridesBtn = document.getElementById("resetOverridesBtn");
@@ -736,6 +740,7 @@ HTML = """
       let ricOverrideEnabled = false;
       let ricItemExceptions = [];
       let activeRicTab = "category";
+      let maxDiscountManuallySet = false;
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -1212,21 +1217,32 @@ HTML = """
         aggressivityValue.textContent = globalParams.aggressivity;
         aggressivityMode.value = globalParams.aggressivity_mode;
         bufferRic.value = globalParams.buffer_ric;
-        maxDiscount.value = globalParams.max_discount_percent;
+        maxDiscount.value =
+          globalParams.max_discount_percent === null || globalParams.max_discount_percent === undefined
+            ? ""
+            : globalParams.max_discount_percent;
         roundingMode.value =
           globalParams.rounding === null || globalParams.rounding === undefined
             ? "NONE"
             : String(globalParams.rounding);
       }
 
-      function updatePricingLimitsHint() {
+      function updatePricingLimitsHint({ updateMaxDiscount = true } = {}) {
         if (pricingLimits.max_discount_real_min !== null && pricingLimits.max_discount_real_min !== undefined) {
-          const limit = Number(pricingLimits.max_discount_real_min);
+          const minLimit = Number(pricingLimits.max_discount_real_min);
+          const maxLimit = pricingLimits.max_discount_real_max !== null
+            ? Number(pricingLimits.max_discount_real_max)
+            : minLimit;
+          const varies = Math.abs(minLimit - maxLimit) > 0.01;
+          const hintSuffix = varies ? " (varia per riga)" : "";
+          const limit = minLimit;
           maxDiscount.max = limit;
-          maxDiscountHint.textContent = `Sconto massimo consentito: ${limit.toFixed(2)}%`;
-          if (globalParams.max_discount_percent > limit) {
-            globalParams.max_discount_percent = limit;
-            maxDiscount.value = limit.toFixed(2);
+          maxDiscountHint.textContent = `Sconto massimo consentito: ${limit.toFixed(2)}%${hintSuffix}`;
+          const currentValue = Number(globalParams.max_discount_percent ?? limit);
+          const shouldClamp = currentValue > limit;
+          if (updateMaxDiscount && (!maxDiscountManuallySet || shouldClamp)) {
+            globalParams.max_discount_percent = shouldClamp ? limit : currentValue;
+            maxDiscount.value = Number(globalParams.max_discount_percent).toFixed(2);
           }
         } else {
           maxDiscountHint.textContent = "";
@@ -1318,7 +1334,7 @@ HTML = """
           discountInput.type = "number";
           discountInput.step = "0.1";
           discountInput.min = "0";
-          discountInput.value = Number(row.desired_discount_percent).toFixed(2);
+          discountInput.value = Number(row.desired_discount_pct).toFixed(2);
           discountInput.disabled = currentPriceMode !== "discount";
           discountInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
@@ -1331,7 +1347,7 @@ HTML = """
           tr.appendChild(discountCell);
 
           const appliedDiscountCell = document.createElement("td");
-          appliedDiscountCell.textContent = Number(row.applied_discount_percent).toFixed(2);
+          appliedDiscountCell.textContent = Number(row.applied_discount_pct).toFixed(2);
           tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
@@ -1414,16 +1430,16 @@ HTML = """
             ["Eccezione articolo", row.item_exception_hit ? "Sì" : "No"],
             ["Prezzo baseline", row.baseline_price],
             ["Prezzo minimo (RIC minimo)", row.floor_price],
-            ["Sconto massimo consentito", row.max_discount_real],
-            ["Max sconto effettivo", row.max_discount_effective],
+            ["Sconto massimo consentito", row.max_discount_real_pct],
+            ["Max sconto effettivo", row.max_discount_effective_pct],
             ["Buffer ric", row.buffer_ric],
             ["Aggressività", row.aggressivity],
             ["Modalità", row.aggressivity_mode],
             ["Max sconto (cap)", row.max_discount_percent],
             ["Sconto override", row.discount_override],
             ["Prezzo override", row.unit_price_override],
-            ["Sconto richiesto", row.desired_discount_percent],
-            ["Sconto effettivo", row.applied_discount_percent],
+            ["Sconto richiesto", row.desired_discount_pct],
+            ["Sconto effettivo", row.applied_discount_pct],
             ["Prezzo candidato", row.candidate_price],
             ["Clamp reason", row.clamp_reason],
             ["Prezzo finale", row.final_price],
@@ -1520,6 +1536,13 @@ HTML = """
         copyBlock = res.copy_block || copyBlock;
         lastValidation = res.validation || { ok: true, errors: [] };
         pricingLimits = res.pricing_limits || pricingLimits;
+        if (res.global_max_sconto_used_pct !== undefined && res.global_max_sconto_used_pct !== null) {
+          const allowedValue = Number(res.global_max_sconto_used_pct);
+          const shouldClamp = Number(globalParams.max_discount_percent ?? allowedValue) > allowedValue;
+          if (!maxDiscountManuallySet || shouldClamp) {
+            globalParams.max_discount_percent = allowedValue;
+          }
+        }
         const validationErrors = (lastValidation.errors || [])
           .map((err) => `${err.sku}: minimo ${Number(err.min_unit_price).toFixed(2)}`)
           .join(" | ");
@@ -1615,6 +1638,7 @@ HTML = """
         }
         globalParams = res.pricing || globalParams;
         syncControls();
+        maxDiscountManuallySet = false;
         perRowOverrides = {};
         applyQuoteResponse(res);
         await refreshStatus();
@@ -1656,8 +1680,10 @@ HTML = """
           if (value > maxAllowed) {
             value = maxAllowed;
             maxDiscount.value = maxAllowed.toFixed(2);
+            setInfo(`Cap sconto ridotto al massimo consentito (${maxAllowed.toFixed(2)}%).`);
           }
         }
+        maxDiscountManuallySet = true;
         globalParams.max_discount_percent = value;
         scheduleRecalc();
       });
@@ -1680,8 +1706,14 @@ HTML = """
       bufferRicOverrideToggle.addEventListener("change", () => {
         bufferRic.readOnly = !bufferRicOverrideToggle.checked;
         if (!bufferRicOverrideToggle.checked) {
-          updatePricingLimitsHint();
+          updatePricingLimitsHint({ updateMaxDiscount: false });
         }
+      });
+
+      resetMaxDiscount.addEventListener("click", () => {
+        maxDiscountManuallySet = false;
+        updatePricingLimitsHint();
+        scheduleRecalc();
       });
 
       copyBtn.addEventListener("click", async () => {
