@@ -256,6 +256,50 @@ HTML = """
       .lock-cell {
         text-align: center;
       }
+      .alt-badge {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 10px;
+        background: #ffe0c2;
+        color: #7a2d00;
+        font-size: 11px;
+        font-weight: 700;
+        margin-right: 6px;
+      }
+      .alt-column.hidden {
+        display: none;
+      }
+      .alt-panel {
+        border: 1px solid #f0d6bf;
+        background: #fffaf5;
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .alt-suggestions {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+      .alt-card {
+        border: 1px solid #f0d6bf;
+        border-radius: 8px;
+        padding: 10px;
+        background: #ffffff;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .alt-card h4 {
+        margin: 0;
+        font-size: 14px;
+      }
+      .alt-card .meta {
+        font-size: 12px;
+        color: #444;
+      }
+      .alt-card .actions {
+        margin-top: 0;
+      }
       .warning {
         color: #7a2d00;
         font-weight: 600;
@@ -490,6 +534,14 @@ HTML = """
               <option value="0.10">0.10</option>
             </select>
           </div>
+          <div>
+            <label class="inline">
+              <input type="checkbox" id="altModeToggle" />
+              Modalità ALTOVENDENTI
+            </label>
+            <div class="info" id="altModeInfo">PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.</div>
+            <div class="info">Quando attivo ALT, il prezzo promo è manuale e non applica sconti.</div>
+          </div>
           <div class="actions inline">
             <button id="recalcBtn">Ricalcola</button>
             <button id="resetOverridesBtn" class="secondary">Reset override</button>
@@ -510,6 +562,7 @@ HTML = """
                 <th>Lock</th>
                 <th>Codice</th>
                 <th>Descrizione</th>
+                <th class="alt-column">ALT</th>
                 <th>Qty</th>
                 <th>LM</th>
                 <th>Sconto fisso (SCONTI2026)</th>
@@ -527,6 +580,11 @@ HTML = """
             </thead>
             <tbody id="resultsBody"></tbody>
           </table>
+        </div>
+        <div class="alt-panel" id="altPanel" style="display:none">
+          <h4>Suggerimenti ALT</h4>
+          <div class="info" id="altSuggestionsInfo"></div>
+          <div class="alt-suggestions" id="altSuggestions"></div>
         </div>
         <div class="error" id="validationBox"></div>
         <div class="warning" id="warningBox"></div>
@@ -695,6 +753,11 @@ HTML = """
       const tracePanel = document.querySelector(".trace-panel");
       const traceSummary = document.getElementById("traceSummary");
       const traceRows = document.getElementById("traceRows");
+      const altModeToggle = document.getElementById("altModeToggle");
+      const altModeInfo = document.getElementById("altModeInfo");
+      const altPanel = document.getElementById("altPanel");
+      const altSuggestions = document.getElementById("altSuggestions");
+      const altSuggestionsInfo = document.getElementById("altSuggestionsInfo");
       const ricParamsBtn = document.getElementById("ricParamsBtn");
       const ricModal = document.getElementById("ricModal");
       const closeRic = document.getElementById("closeRic");
@@ -731,7 +794,8 @@ HTML = """
         aggressivity_mode: "discount_from_baseline",
         max_discount_percent: 10,
         buffer_ric: 2,
-        rounding: 0.01
+        rounding: 0.01,
+        alt_mode: false
       };
       let currentPriceMode = "discount";
       let perRowOverrides = {};
@@ -743,6 +807,8 @@ HTML = """
       let ricItemExceptions = [];
       let activeRicTab = "category";
       let maxDiscountManuallySet = false;
+      let altSuggestionsData = [];
+      let altAvailableCount = 0;
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -1204,6 +1270,16 @@ HTML = """
         exportBtn.disabled = !status.has_results || !lastValidation.ok || !status.ric_overrides_ok;
         recalcBtn.disabled = !status.has_results;
         resetOverridesBtn.disabled = !status.has_results;
+        altAvailableCount = status.alt_available_count || 0;
+        altModeToggle.disabled = altAvailableCount === 0;
+        altModeInfo.textContent =
+          altAvailableCount === 0
+            ? "PREZZO_ALT non presente nello stock: modalità ALT disattivata."
+            : "PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.";
+        if (altAvailableCount === 0) {
+          globalParams.alt_mode = false;
+          altModeToggle.checked = false;
+        }
         if (!status.ric_overrides_ok) {
           const details = (status.ric_override_errors || []).join(" | ");
           setRicOverrideBanner(
@@ -1227,24 +1303,80 @@ HTML = """
           globalParams.rounding === null || globalParams.rounding === undefined
             ? "NONE"
             : String(globalParams.rounding);
+        altModeToggle.checked = Boolean(globalParams.alt_mode);
       }
 
       function updatePricingLimitsHint({ updateMaxDiscount = true } = {}) {
-        if (pricingLimits.max_discount_real_min !== null && pricingLimits.max_discount_real_min !== undefined) {
-          const minLimit = Number(pricingLimits.max_discount_real_min);
-          const maxLimit = pricingLimits.max_discount_real_max !== null
-            ? Number(pricingLimits.max_discount_real_max)
-            : minLimit;
-          const varies = Math.abs(minLimit - maxLimit) > 0.01;
-          const hintSuffix = varies ? " (varia per riga)" : "";
-          maxDiscountHint.textContent = `Cap minimo tra righe (info): ${minLimit.toFixed(2)}%${hintSuffix}`;
-        } else {
-          maxDiscountHint.textContent = "";
-        }
+        maxDiscountHint.textContent = "";
         if (!bufferRicOverrideToggle.checked && pricingLimits.buffer_ric_example !== null) {
           globalParams.buffer_ric = Number(pricingLimits.buffer_ric_example);
           bufferRic.value = Number(pricingLimits.buffer_ric_example).toFixed(2);
         }
+      }
+
+      function updateAltVisibility() {
+        const showAlt = Boolean(globalParams.alt_mode);
+        document.querySelectorAll(".alt-column").forEach((cell) => {
+          cell.classList.toggle("hidden", !showAlt);
+        });
+        altPanel.style.display = showAlt ? "" : "none";
+      }
+
+      function renderAltSuggestions(list) {
+        altSuggestions.innerHTML = "";
+        altSuggestionsData = list || [];
+        if (!globalParams.alt_mode) {
+          altSuggestionsInfo.textContent = "";
+          return;
+        }
+        if (!altSuggestionsData.length) {
+          altSuggestionsInfo.textContent = "Nessun suggerimento ALT disponibile.";
+          return;
+        }
+        altSuggestionsInfo.textContent = "";
+        altSuggestionsData.forEach((item) => {
+          const card = document.createElement("div");
+          card.className = "alt-card";
+          const title = document.createElement("h4");
+          title.textContent = `${item.codice} — ${item.descrizione}`;
+          card.appendChild(title);
+
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.innerHTML = `Categoria: ${item.categoria || "-"}<br>Prezzo ALT: ${Number(item.prezzo_alt).toFixed(2)}`;
+          card.appendChild(meta);
+
+          const qtyLabel = document.createElement("label");
+          qtyLabel.textContent = "Qty suggerita";
+          const qtyInput = document.createElement("input");
+          qtyInput.type = "number";
+          qtyInput.min = "1";
+          qtyInput.step = "1";
+          qtyInput.value = item.qty || 1;
+          card.appendChild(qtyLabel);
+          card.appendChild(qtyInput);
+
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          const addBtn = document.createElement("button");
+          addBtn.type = "button";
+          addBtn.textContent = "Aggiungi al preventivo";
+          addBtn.addEventListener("click", async () => {
+            setError("");
+            const res = await api("/api/alt/add", {
+              sku: item.codice,
+              qty: Number(qtyInput.value)
+            });
+            if (res.ok === false) {
+              setError(res.error || "Errore aggiunta ALT");
+              return;
+            }
+            applyQuoteResponse(res);
+          });
+          actions.appendChild(addBtn);
+          card.appendChild(actions);
+          altSuggestions.appendChild(card);
+        });
       }
 
       function renderTable(rows, validation) {
@@ -1287,6 +1419,33 @@ HTML = """
             td.textContent = value ?? "";
             tr.appendChild(td);
           });
+
+          const altCell = document.createElement("td");
+          altCell.className = "alt-column";
+          if (row.alt_available) {
+            const badge = document.createElement("span");
+            badge.className = "alt-badge";
+            badge.textContent = "ALT";
+            altCell.appendChild(badge);
+          }
+          const altToggle = document.createElement("input");
+          altToggle.type = "checkbox";
+          altToggle.checked = Boolean(row.alt_selected);
+          altToggle.disabled = !globalParams.alt_mode || !row.alt_available || lockInput.checked;
+          altToggle.addEventListener("change", () => {
+            const override = perRowOverrides[row.codice] || {};
+            override.alt_selected = altToggle.checked;
+            if (altToggle.checked) {
+              delete override.discount_override;
+              if (!override.lock) {
+                delete override.unit_price_override;
+              }
+            }
+            perRowOverrides[row.codice] = override;
+            scheduleRecalc();
+          });
+          altCell.appendChild(altToggle);
+          tr.appendChild(altCell);
 
           const qtyCell = document.createElement("td");
           const qtyInput = document.createElement("input");
@@ -1383,6 +1542,8 @@ HTML = """
             noteCell.textContent = `Sconto bloccato: pavimento RIC minimo ${Number(row.required_ric).toFixed(2)}% (prezzo minimo=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)})`;
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
+          } else if (row.note) {
+            noteCell.textContent = row.note;
           } else {
             noteCell.textContent = "";
           }
@@ -1500,11 +1661,13 @@ HTML = """
             aggressivity_mode: status.pricing.aggressivity_mode ?? globalParams.aggressivity_mode,
             max_discount_percent: status.pricing.max_discount_percent ?? globalParams.max_discount_percent,
             buffer_ric: status.pricing.buffer_ric ?? globalParams.buffer_ric,
-            rounding: status.pricing.rounding ?? globalParams.rounding
+            rounding: status.pricing.rounding ?? globalParams.rounding,
+            alt_mode: status.alt_mode ?? globalParams.alt_mode
           };
           syncControls();
           bufferRic.readOnly = !bufferRicOverrideToggle.checked;
         }
+        updateAltVisibility();
       }
 
       function updateHistoryCounter(selectedCount) {
@@ -1540,6 +1703,19 @@ HTML = """
         lastValidation = res.validation || { ok: true, errors: [] };
         pricingLimits = res.pricing_limits || pricingLimits;
         lastPricingRows = res.pricing_rows || [];
+        if (res.alt_mode !== undefined) {
+          globalParams.alt_mode = res.alt_mode;
+        }
+        (res.quote || []).forEach((row) => {
+          const override = perRowOverrides[row.codice] || {};
+          if (row.alt_selected) {
+            override.alt_selected = true;
+            perRowOverrides[row.codice] = override;
+          } else if (override.alt_selected) {
+            delete override.alt_selected;
+            perRowOverrides[row.codice] = override;
+          }
+        });
         const validationErrors = (lastValidation.errors || [])
           .map((err) => `${err.sku}: minimo ${Number(err.min_unit_price).toFixed(2)}`)
           .join(" | ");
@@ -1557,6 +1733,8 @@ HTML = """
         }
         renderTable(res.quote, lastValidation);
         renderTrace(res.trace || {});
+        renderAltSuggestions(res.alt_suggestions || []);
+        updateAltVisibility();
         if (res.ric_override_errors && res.ric_override_errors.length) {
           setRicOverrideBanner(res.ric_override_errors.join(" | "));
         }
@@ -1690,6 +1868,17 @@ HTML = """
         const value = roundingMode.value;
         globalParams.rounding = value === "NONE" ? null : Number(value);
         scheduleRecalc();
+      });
+
+      altModeToggle.addEventListener("change", async () => {
+        globalParams.alt_mode = altModeToggle.checked;
+        await api("/api/set_alt_mode", { alt_mode: globalParams.alt_mode });
+        updateAltVisibility();
+        if (lastQuoteRows.length) {
+          await recalcQuote();
+        } else {
+          renderAltSuggestions([]);
+        }
       });
 
       bufferRicOverrideToggle.addEventListener("change", () => {
@@ -1934,6 +2123,7 @@ HTML = """
 
       refreshStatus();
       tracePanel.style.display = toggleTrace.checked ? "" : "none";
+      updateAltVisibility();
     </script>
   </body>
 </html>

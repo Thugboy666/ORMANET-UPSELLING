@@ -22,10 +22,12 @@ from app.engine import (
     DEFAULT_BUFFER_RIC,
     DEFAULT_MAX_DISCOUNT,
     DEFAULT_ROUNDING,
+    OrderItem,
     PricingRow,
     PricingParams,
     SessionLogger,
     UpsellRow,
+    compute_alt_suggestions,
     compute_upsell,
     export_excel,
     get_fixed_discount,
@@ -58,6 +60,7 @@ LOGS_DIR = BASE_DIR / "logs"
 MAPPING_PATH = CONFIG_DIR / "field_mapping.json"
 RIC_OVERRIDES_PATH = CONFIG_DIR / "ric_overrides.json"
 RIC_ITEM_EXCEPTIONS_PATH = CONFIG_DIR / "ric_item_exceptions.json"
+ALT_SUGGESTION_LIMIT = 3
 
 
 @dataclass
@@ -81,6 +84,10 @@ class AppState:
     ric_overrides: dict[str, dict] = field(default_factory=dict)
     ric_override_errors: list[str] = field(default_factory=list)
     ric_item_exceptions: list[dict[str, Any]] = field(default_factory=list)
+    alt_mode: bool = False
+    alt_suggestions: list[dict[str, Any]] = field(default_factory=list)
+    extra_rows: list[OrderItem] = field(default_factory=list)
+    stock_alt_count: int = 0
 
     def reset_results(self) -> None:
         self.upsell_rows = []
@@ -90,6 +97,8 @@ class AppState:
         self.validation = {"ok": True, "errors": []}
         self.warnings = []
         self.per_row_overrides = {}
+        self.alt_suggestions = []
+        self.extra_rows = []
 
     def ready_to_compute(self) -> bool:
         return (
@@ -311,6 +320,18 @@ def list_orders() -> dict[str, list[str]]:
     return {"storico": storico, "upsell": upsell}
 
 
+def load_current_items(logger: SessionLogger) -> list[OrderItem]:
+    if STATE.current_order is None:
+        return []
+    items = load_orders([STATE.current_order], logger, STATE.field_mapping.get("ORDINI", {}))
+    existing_codes = {item.codice for item in items}
+    for extra in STATE.extra_rows:
+        if extra.codice in existing_codes:
+            continue
+        items.append(extra)
+    return items
+
+
 def build_pricing_limits(pricing_rows: list[PricingRow], trace: dict) -> dict[str, float | None]:
     if not pricing_rows:
         rows = trace.get("rows", []) if isinstance(trace, dict) else []
@@ -394,14 +415,29 @@ def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str,
         "Righe Upsell:",
     ]
     for row in rows:
+        note = row.note or row.clamp_reason or "-"
         lines.append(
             f"- {row.codice} | {row.descrizione} | {row.qty} | LM {row.lm:.2f} | "
             f"Sconto% {row.desired_discount_pct:.2f} | Prezzo {row.prezzo_unit:.2f} | "
             f"Ric% {row.final_ric_percent:.2f} | "
             f"Ric min% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
-            f"Disponibile dal {row.disponibile_dal or '-'} | Note {row.clamp_reason or '-'}"
+            f"Disponibile dal {row.disponibile_dal or '-'} | Note {note}"
         )
     return "\n".join(lines)
+
+
+def serialize_alt_suggestions(rows: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "codice": row.codice,
+            "descrizione": row.descrizione,
+            "categoria": row.categoria,
+            "marca": row.marca,
+            "prezzo_alt": row.prezzo_alt,
+            "qty": row.qty,
+        }
+        for row in rows
+    ]
 
 
 def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
@@ -412,6 +448,9 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "qty": row.qty,
             "prezzo_unit": row.prezzo_unit,
             "lm": row.lm,
+            "prezzo_alt": row.prezzo_alt,
+            "alt_available": row.alt_available,
+            "alt_selected": row.alt_selected,
             "macro_categoria": row.macro_categoria,
             "fixed_discount_percent": row.fixed_discount_percent,
             "ric_base": row.ric_base,
@@ -431,6 +470,7 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "disp": row.disp,
             "disponibile_dal": row.disponibile_dal or "",
             "clamp_reason": row.clamp_reason,
+            "note": row.note,
             "min_unit_price": row.min_unit_price,
         }
         for row in rows
@@ -458,6 +498,82 @@ def serialize_pricing_rows(rows: list[PricingRow]) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def build_quote_payload(order_name: str) -> dict[str, Any]:
+    pricing_limits = build_pricing_limits(STATE.pricing_rows, STATE.trace)
+    allowed_cap = pricing_limits.get("max_discount_real_min")
+    if pricing_limits.get("buffer_ric_example") is not None:
+        STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
+    client = STATE.selected_client()
+    if client is None:
+        raise ValueError("Cliente non selezionato")
+    STATE.copy_block = build_copy_block(STATE.upsell_rows, client, order_name, STATE.causale or "")
+    response = {
+        "ok": True,
+        "success": True,
+        "quote": serialize_rows(STATE.upsell_rows),
+        "pricing_rows": serialize_pricing_rows(STATE.pricing_rows),
+        "trace": STATE.trace,
+        "warnings": STATE.warnings,
+        "validation": STATE.validation,
+        "ric_override_errors": STATE.ric_override_errors,
+        "copy_block": STATE.copy_block,
+        "pricing": {
+            "aggressivity": STATE.pricing.aggressivity,
+            "aggressivity_mode": STATE.pricing.aggressivity_mode,
+            "max_discount_percent": STATE.pricing.max_discount_percent,
+            "buffer_ric": STATE.pricing.buffer_ric,
+            "rounding": STATE.pricing.rounding,
+        },
+        "pricing_limits": pricing_limits,
+        "global_max_sconto_allowed_pct": allowed_cap,
+        "alt_mode": STATE.alt_mode,
+        "alt_suggestions": serialize_alt_suggestions(STATE.alt_suggestions),
+    }
+    return response
+
+
+def compute_and_update(
+    *,
+    historical_items: list[OrderItem],
+    current_items: list[OrderItem],
+    sconti: dict,
+    category_map: dict,
+    client: ClientInfo,
+) -> None:
+    (
+        STATE.upsell_rows,
+        STATE.pricing_rows,
+        STATE.trace,
+        STATE.validation,
+        STATE.warnings,
+    ) = compute_upsell(
+        current_items=current_items,
+        historical_items=historical_items,
+        stock=STATE.stock,
+        client=client,
+        sconti=sconti,
+        category_map=category_map,
+        pricing=STATE.pricing,
+        causale=STATE.causale or CAUSALI[0],
+        logger=STATE.logger,
+        overrides=STATE.per_row_overrides,
+        ric_overrides=STATE.ric_overrides,
+        item_exceptions=STATE.ric_item_exceptions,
+    )
+    if STATE.alt_mode and STATE.stock_alt_count > 0:
+        STATE.alt_suggestions = compute_alt_suggestions(
+            stock_items=STATE.stock,
+            storico_items=historical_items,
+            current_rows=STATE.upsell_rows,
+            category_map=category_map,
+            logger=STATE.logger,
+            limit=ALT_SUGGESTION_LIMIT,
+        )
+        STATE.logger.info("Suggerimenti ALT generati: %s", len(STATE.alt_suggestions))
+    else:
+        STATE.alt_suggestions = []
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -529,6 +645,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "buffer_ric": STATE.pricing.buffer_ric,
                         "rounding": STATE.pricing.rounding,
                     },
+                    "alt_mode": STATE.alt_mode,
+                    "alt_available_count": STATE.stock_alt_count,
                     "validation_ok": STATE.validation.get("ok", True),
                     "ric_overrides_ok": len(STATE.ric_override_errors) == 0,
                     "ric_override_errors": STATE.ric_override_errors,
@@ -561,6 +679,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 STATE.stock = load_stock(
                     stock_path, STATE.logger, STATE.field_mapping.get("STOCK", {})
+                )
+                STATE.stock_alt_count = sum(
+                    1
+                    for item in STATE.stock.values()
+                    if item.prezzo_alt is not None and item.prezzo_alt > 0
+                )
+                STATE.logger.info(
+                    "Prodotti altovendenti trovati: %s",
+                    STATE.stock_alt_count,
                 )
                 self._send_json(
                     {"success": True, "message": "Clienti e stock caricati"},
@@ -670,6 +797,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({"success": True})
             return
 
+        if self.path == "/api/set_alt_mode":
+            STATE.alt_mode = bool(payload.get("alt_mode"))
+            self._send_json({"ok": True, "alt_mode": STATE.alt_mode})
+            return
+
         if self.path == "/api/set_aggressivita":
             aggressivita = payload.get("aggressivita", 0)
             try:
@@ -697,13 +829,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 historical_items = load_orders(
                     STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
                 )
-                current_items = load_orders(
-                    [STATE.current_order], STATE.logger, STATE.field_mapping.get("ORDINI", {})
-                )
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
                 STATE.per_row_overrides = {}
+                STATE.extra_rows = []
                 STATE.pricing = PricingParams(
                     aggressivity=DEFAULT_AGGRESSIVITY,
                     aggressivity_mode="discount_from_baseline",
@@ -711,56 +841,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     buffer_ric=DEFAULT_BUFFER_RIC,
                     rounding=DEFAULT_ROUNDING,
                 )
-                (
-                    STATE.upsell_rows,
-                    STATE.pricing_rows,
-                    STATE.trace,
-                    STATE.validation,
-                    STATE.warnings,
-                ) = compute_upsell(
-                    current_items=current_items,
+                current_items = load_current_items(STATE.logger)
+                compute_and_update(
                     historical_items=historical_items,
-                    stock=STATE.stock,
-                    client=client,
+                    current_items=current_items,
                     sconti=sconti,
                     category_map=category_map,
-                    pricing=STATE.pricing,
-                    causale=STATE.causale or CAUSALI[0],
-                    logger=STATE.logger,
-                    overrides=STATE.per_row_overrides,
-                    ric_overrides=STATE.ric_overrides,
-                    item_exceptions=STATE.ric_item_exceptions,
+                    client=client,
                 )
-                pricing_limits = build_pricing_limits(STATE.pricing_rows, STATE.trace)
-                allowed_cap = pricing_limits.get("max_discount_real_min")
-                if pricing_limits.get("buffer_ric_example") is not None:
-                    STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
-                STATE.copy_block = build_copy_block(
-                    STATE.upsell_rows, client, order_name, STATE.causale or ""
-                )
-                self._send_json(
-                    {
-                        "ok": True,
-                        "success": True,
-                        "quote": serialize_rows(STATE.upsell_rows),
-                        "pricing_rows": serialize_pricing_rows(STATE.pricing_rows),
-                        "trace": STATE.trace,
-                        "warnings": STATE.warnings,
-                        "validation": STATE.validation,
-                        "ric_override_errors": STATE.ric_override_errors,
-                        "copy_block": STATE.copy_block,
-                        "pricing": {
-                            "aggressivity": STATE.pricing.aggressivity,
-                            "aggressivity_mode": STATE.pricing.aggressivity_mode,
-                            "max_discount_percent": STATE.pricing.max_discount_percent,
-                            "buffer_ric": STATE.pricing.buffer_ric,
-                            "rounding": STATE.pricing.rounding,
-                        },
-                        "pricing_limits": pricing_limits,
-                        "global_max_sconto_allowed_pct": allowed_cap,
-                    }
-                )
+                self._send_json(build_quote_payload(order_name))
             except (MappingError, DataError) as exc:
                 STATE.logger.error("Errore mapping", error_type="mapping_error", details=exc.details)
                 self._send_json(
@@ -794,6 +884,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 global_params = payload.get("global_params", {})
                 overrides = payload.get("per_row_overrides", {})
                 if isinstance(global_params, dict):
+                    alt_mode = global_params.get("alt_mode")
+                    if alt_mode is not None:
+                        STATE.alt_mode = bool(alt_mode)
                     rounding_value = global_params.get("rounding", STATE.pricing.rounding)
                     if rounding_value in ("NONE", "", None):
                         rounding_value = None
@@ -818,58 +911,103 @@ class RequestHandler(BaseHTTPRequestHandler):
                 historical_items = load_orders(
                     STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
                 )
-                current_items = load_orders(
-                    [STATE.current_order], STATE.logger, STATE.field_mapping.get("ORDINI", {})
-                )
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
-                (
-                    STATE.upsell_rows,
-                    STATE.pricing_rows,
-                    STATE.trace,
-                    STATE.validation,
-                    STATE.warnings,
-                ) = compute_upsell(
-                    current_items=current_items,
+                current_items = load_current_items(STATE.logger)
+                compute_and_update(
                     historical_items=historical_items,
-                    stock=STATE.stock,
-                    client=client,
+                    current_items=current_items,
                     sconti=sconti,
                     category_map=category_map,
-                    pricing=STATE.pricing,
-                    causale=STATE.causale or CAUSALI[0],
-                    logger=STATE.logger,
-                    overrides=STATE.per_row_overrides,
-                    ric_overrides=STATE.ric_overrides,
-                    item_exceptions=STATE.ric_item_exceptions,
+                    client=client,
                 )
-                pricing_limits = build_pricing_limits(STATE.pricing_rows, STATE.trace)
-                allowed_cap = pricing_limits.get("max_discount_real_min")
-                if pricing_limits.get("buffer_ric_example") is not None:
-                    STATE.pricing.buffer_ric = float(pricing_limits["buffer_ric_example"])
                 order_name = STATE.current_order.name if STATE.current_order else ""
-                STATE.copy_block = build_copy_block(
-                    STATE.upsell_rows, client, order_name, STATE.causale or ""
-                )
-                self._send_json(
-                    {
-                        "ok": True,
-                        "quote": serialize_rows(STATE.upsell_rows),
-                        "pricing_rows": serialize_pricing_rows(STATE.pricing_rows),
-                        "trace": STATE.trace,
-                        "warnings": STATE.warnings,
-                        "validation": STATE.validation,
-                        "ric_override_errors": STATE.ric_override_errors,
-                        "copy_block": STATE.copy_block,
-                        "pricing_limits": pricing_limits,
-                        "global_max_sconto_allowed_pct": allowed_cap,
-                    }
-                )
+                payload = build_quote_payload(order_name)
+                payload.pop("pricing", None)
+                payload.pop("success", None)
+                self._send_json(payload)
             except Exception as exc:
                 STATE.logger.error("Errore recalcolo upsell", error=str(exc))
                 self._send_json(
                     {"ok": False, "error": f"Errore recalcolo: {exc}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+
+        if self.path == "/api/alt/add":
+            if not STATE.ready_to_compute():
+                self._send_json(
+                    {"ok": False, "error": "Dati non pronti."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            sku = str(payload.get("sku", "")).strip()
+            qty = payload.get("qty", 1)
+            if not sku:
+                self._send_json(
+                    {"ok": False, "error": "SKU mancante."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            stock_item = STATE.stock.get(sku)
+            if not stock_item or stock_item.prezzo_alt is None or stock_item.prezzo_alt <= 0:
+                self._send_json(
+                    {"ok": False, "error": "PREZZO_ALT non disponibile per questo SKU."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            current_items = load_current_items(STATE.logger)
+            if any(item.codice == sku for item in current_items):
+                self._send_json(
+                    {"ok": False, "error": "SKU già presente nel preventivo."},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                qty_value = max(1.0, float(qty))
+            except (TypeError, ValueError):
+                qty_value = 1.0
+            STATE.extra_rows.append(
+                OrderItem(
+                    marca=stock_item.marca,
+                    categoria=stock_item.categoria,
+                    codice=stock_item.codice,
+                    descrizione=stock_item.descrizione,
+                    qty=qty_value,
+                    prezzo_unit=0.0,
+                    lm=stock_item.lm,
+                    source_file="ALT",
+                    source_row=None,
+                )
+            )
+            override = STATE.per_row_overrides.get(sku, {})
+            override["qty"] = qty_value
+            override["alt_selected"] = True
+            STATE.per_row_overrides[sku] = override
+            try:
+                sconti = load_json(CONFIG_DIR / "sconti_2026.json")
+                category_map = load_json(CONFIG_DIR / "category_map.json")
+                historical_items = load_orders(
+                    STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
+                )
+                client = STATE.selected_client()
+                if client is None:
+                    raise ValueError("Cliente non selezionato")
+                current_items = load_current_items(STATE.logger)
+                compute_and_update(
+                    historical_items=historical_items,
+                    current_items=current_items,
+                    sconti=sconti,
+                    category_map=category_map,
+                    client=client,
+                )
+                order_name = STATE.current_order.name if STATE.current_order else ""
+                self._send_json(build_quote_payload(order_name))
+            except Exception as exc:
+                STATE.logger.error("Errore aggiunta ALT", error=str(exc))
+                self._send_json(
+                    {"ok": False, "error": f"Errore aggiunta ALT: {exc}"},
                     status=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
             return

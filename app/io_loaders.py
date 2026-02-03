@@ -68,6 +68,7 @@ DEFAULT_FIELD_MAPPING: dict[str, dict[str, list[str]]] = {
         "listino_ri": ["Listino RI"],
         "listino_di": ["Listino DI"],
         "lm": ["LM", "Listino madre", "Listino Madre"],
+        "prezzo_alt": ["PREZZO_ALT", "Prezzo Alt", "Prezzo ALT"],
     },
     "CLIENTI": {
         "id": ["ID", "Codice", "Codice numerico", "Cod. Cliente"],
@@ -202,6 +203,38 @@ def parse_float(
         ) from exc
 
 
+def parse_optional_price(
+    value: Any,
+    field_name: str,
+    row_index: int | None,
+    filename: str | None,
+    logger: SessionLogger,
+) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = parse_float(value, field_name, row_index, filename)
+    except DataError as exc:
+        logger.info(
+            "Valore non valido per %s in %s riga %s: %s",
+            field_name,
+            filename or "-",
+            row_index or "-",
+            exc.details.get("raw_value"),
+        )
+        return None
+    if parsed < 0:
+        logger.info(
+            "Valore negativo per %s in %s riga %s: %.2f",
+            field_name,
+            filename or "-",
+            row_index or "-",
+            parsed,
+        )
+        return None
+    return parsed
+
+
 def _raise_mapping_error(
     logger: SessionLogger,
     mapping_type: str,
@@ -320,6 +353,13 @@ def load_stock(
                 path.name,
             ),
             lm=parse_float(get_cell(row, indices.get("lm"), 0), "lm", row_index, path.name),
+            prezzo_alt=parse_optional_price(
+                get_cell(row, indices.get("prezzo_alt")),
+                "prezzo_alt",
+                row_index,
+                path.name,
+                logger,
+            ),
             source_file=path.name,
             source_row=row_index,
         )

@@ -51,6 +51,7 @@ class StockItem:
     listino_ri: float
     listino_di: float
     lm: float
+    prezzo_alt: float | None = None
     source_file: str | None = None
     source_row: int | None = None
 
@@ -75,6 +76,9 @@ class UpsellRow:
     qty: float
     prezzo_unit: float
     lm: float
+    prezzo_alt: float | None
+    alt_available: bool
+    alt_selected: bool
     macro_categoria: str
     fixed_discount_percent: float
     ric_base: float
@@ -95,6 +99,17 @@ class UpsellRow:
     totale: float
     disp: float
     disponibile_dal: str | None = None
+    note: str | None = None
+
+
+@dataclass
+class AltSuggestion:
+    codice: str
+    descrizione: str
+    categoria: str
+    marca: str
+    prezzo_alt: float
+    qty: float = 1.0
 
 
 @dataclass
@@ -461,6 +476,69 @@ def is_available(stock_item: StockItem, causale: str) -> tuple[bool, str | None]
     return stock_item.disp > 0, None
 
 
+def compute_alt_suggestions(
+    stock_items: dict[str, StockItem],
+    storico_items: list[OrderItem],
+    current_rows: list[UpsellRow],
+    category_map: dict,
+    logger: SessionLogger,
+    limit: int = 3,
+) -> list[AltSuggestion]:
+    suggestions: list[AltSuggestion] = []
+    if limit <= 0:
+        return suggestions
+    current_codes = {row.codice for row in current_rows}
+    storico_codes = {item.codice for item in storico_items}
+    category_counts: dict[str, int] = {}
+    brand_counts: dict[str, int] = {}
+    for item in storico_items:
+        macro = map_macro_category(item.categoria, category_map, logger)
+        if macro != "UNKNOWN":
+            category_counts[macro] = category_counts.get(macro, 0) + 1
+        if item.marca:
+            brand_counts[item.marca] = brand_counts.get(item.marca, 0) + 1
+    top_categories = {
+        key
+        for key, _ in sorted(category_counts.items(), key=lambda entry: entry[1], reverse=True)[:5]
+    }
+    top_brands = {
+        key
+        for key, _ in sorted(brand_counts.items(), key=lambda entry: entry[1], reverse=True)[:5]
+    }
+
+    scored_items: list[tuple[int, float, StockItem]] = []
+    for item in stock_items.values():
+        if item.codice in current_codes or item.codice in storico_codes:
+            continue
+        if item.prezzo_alt is None or item.prezzo_alt <= 0:
+            continue
+        macro = map_macro_category(item.categoria, category_map, logger)
+        if macro == "UNKNOWN":
+            continue
+        score = 0
+        if macro in top_categories:
+            score += 2
+        if item.marca in top_brands:
+            score += 1
+        availability = float(item.disp) + float(item.disp_in_arrivo)
+        scored_items.append((score, availability, item))
+
+    scored_items.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    for score, availability, item in scored_items[:limit]:
+        _ = score, availability
+        suggestions.append(
+            AltSuggestion(
+                codice=item.codice,
+                descrizione=item.descrizione,
+                categoria=item.categoria,
+                marca=item.marca,
+                prezzo_alt=float(item.prezzo_alt),
+                qty=1.0,
+            )
+        )
+    return suggestions
+
+
 def compute_upsell(
     current_items: list[OrderItem],
     historical_items: list[OrderItem],
@@ -541,6 +619,10 @@ def compute_upsell(
         qty = max(1.0, float(qty_override)) if qty_override is not None else max(1.0, item.qty)
         discount_override = override.get("discount_override")
         unit_price_override = override.get("unit_price_override")
+        lock_override = bool(override.get("lock"))
+        alt_selected = bool(override.get("alt_selected"))
+        alt_price = stock_item.prezzo_alt if stock_item and stock_item.prezzo_alt is not None else None
+        alt_available = alt_price is not None and alt_price > 0
         if discount_override is not None:
             pricing_payload, clamp_reason = apply_pricing_pipeline(
                 lm=lm_value,
@@ -559,6 +641,15 @@ def compute_upsell(
             candidate_price = pricing_payload["candidate_price"]
 
         final_price = computed_price
+        note = None
+        if alt_selected and alt_available and not lock_override:
+            final_price = round_up_to_step(float(alt_price), pricing.rounding)
+            applied_discount_pct = (
+                (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
+            )
+            applied_discount_pct = max(0.0, min(100.0, applied_discount_pct))
+            final_ric = (final_price / lm_value - 1) * 100 if lm_value else 0.0
+            note = "ALT: prezzo promo"
         if unit_price_override is not None:
             final_price = float(unit_price_override)
             if final_price < floor_price:
@@ -581,6 +672,9 @@ def compute_upsell(
                 qty=qty,
                 prezzo_unit=final_price,
                 lm=lm_value,
+                prezzo_alt=alt_price,
+                alt_available=alt_available,
+                alt_selected=alt_selected,
                 macro_categoria=macro,
                 fixed_discount_percent=fixed_discount,
                 ric_base=ric_base,
@@ -601,6 +695,7 @@ def compute_upsell(
                 totale=totale,
                 disp=stock_item.disp,
                 disponibile_dal=available_date,
+                note=note,
             )
         )
         pricing_rows.append(
@@ -839,7 +934,7 @@ def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, out
             row.totale,
             row.disp,
             row.disponibile_dal or "",
-            row.clamp_reason or "",
+            row.note or row.clamp_reason or "",
         ])
     output_path = output_dir / "preventivo.xlsx"
     wb.save(output_path)
