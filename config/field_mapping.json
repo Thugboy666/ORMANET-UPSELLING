@@ -1,0 +1,171 @@
+{
+  "ORDINI": {
+    "marca": [
+      "Marca"
+    ],
+    "categoria": [
+      "Categoria"
+    ],
+    "codice": [
+      "Cod.",
+      "Cod",
+      "Codice"
+    ],
+    "descrizione": [
+      "Descrizione"
+    ],
+    "qty": [
+      "Qty",
+      "Qta",
+      "Q.tà",
+      "Quantità",
+      "Quantita"
+    ],
+    "mag_centr": [
+      "Mag. Centr.",
+      "Mag. Centr",
+      "Mag.Centr.",
+      "Disp.",
+      "Disponibilità",
+      "Disponibilita"
+    ],
+    "mag_in_arr": [
+      "Mag. in Arr.",
+      "Mag. in Arr",
+      "Disp. in Arrivo",
+      "Disponibilità in Arrivo",
+      "Disponibilita in Arrivo"
+    ],
+    "evaso": [
+      "Evaso"
+    ],
+    "data_arrivo": [
+      "Data arrivo",
+      "Data evasione/arrivo",
+      "Disponibile dal"
+    ],
+    "prezzo_unit_exvat": [
+      "Prezzo",
+      "Pr.sc.",
+      "Prezzo unit",
+      "Prezzo (unit, ex VAT)",
+      "Prezzo unit (ex VAT)"
+    ],
+    "totale_exvat": [
+      "Totale",
+      "Imponibile",
+      "Totale (ex VAT)"
+    ],
+    "s1": [
+      "S1"
+    ],
+    "s2": [
+      "S2"
+    ],
+    "listino_ri10": [
+      "L-RI10",
+      "Listino RI+10%",
+      "Listino RI+10"
+    ],
+    "listino_ri": [
+      "L-RI",
+      "Listino RI"
+    ],
+    "listino_di": [
+      "L-DI",
+      "Listino DI"
+    ]
+  },
+  "STOCK": {
+    "categoria": [
+      "Categoria"
+    ],
+    "marca": [
+      "Marca"
+    ],
+    "codice": [
+      "Codice",
+      "Cod.",
+      "Cod"
+    ],
+    "descrizione": [
+      "Descrizione"
+    ],
+    "disp": [
+      "Disp.",
+      "Disponibile",
+      "Disponibilita"
+    ],
+    "disp_in_arrivo": [
+      "Disp. in Arrivo",
+      "Disponibilità in Arrivo",
+      "Disponibilita in Arrivo",
+      "Mag. in Arr."
+    ],
+    "giacenza": [
+      "Giacenza"
+    ],
+    "data_evasione_arrivo": [
+      "Data evasione/arrivo",
+      "Data arrivo"
+    ],
+    "listino_ri10": [
+      "Listino RI+10%",
+      "Listino RI+10"
+    ],
+    "listino_ri": [
+      "Listino RI"
+    ],
+    "listino_di": [
+      "Listino DI"
+    ]
+  },
+  "CLIENTI": {
+    "id": [
+      "ID",
+      "Codice",
+      "Codice numerico",
+      "Cod. Cliente"
+    ],
+    "ragione_sociale": [
+      "Ragione sociale",
+      "Cliente",
+      "Nominativo"
+    ],
+    "zona": [
+      "Zona",
+      "Regione"
+    ],
+    "listino": [
+      "Listino"
+    ],
+    "categoria_listino": [
+      "Categoria"
+    ],
+    "note_consegna": [
+      "Note consegna"
+    ],
+    "note_amministrative": [
+      "Note amministrative"
+    ],
+    "note": [
+      "Note"
+    ],
+    "email": [
+      "Email",
+      "E-mail"
+    ],
+    "telefono": [
+      "Telefono"
+    ],
+    "cellulare": [
+      "Cellulare"
+    ],
+    "pagamento": [
+      "Pagamento"
+    ],
+    "fatturato": [
+      "Fatturato"
+    ]
+  }
+}

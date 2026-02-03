@@ -23,7 +23,19 @@ from app.engine import (
     export_excel,
     load_json,
 )
-from app.io_loaders import load_clients, load_orders, load_stock
+from app.io_loaders import (
+    DEFAULT_FIELD_MAPPING,
+    DataError,
+    MappingError,
+    match_mapping,
+    normalize_mapping,
+    REQUIRED_FIELDS,
+    STOCK_LISTINO_FIELDS,
+    read_headers,
+    load_clients,
+    load_orders,
+    load_stock,
+)
 from app.web_ui import HTML
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -32,6 +44,7 @@ ORDERS_DIR = IMPORT_DIR / "ORDINI"
 OUTPUT_DIR = BASE_DIR / "output"
 CONFIG_DIR = BASE_DIR / "config"
 LOGS_DIR = BASE_DIR / "logs"
+MAPPING_PATH = CONFIG_DIR / "field_mapping.json"
 
 
 @dataclass
@@ -39,6 +52,7 @@ class AppState:
     logger: SessionLogger
     clients: list[ClientInfo] = field(default_factory=list)
     stock: dict[str, Any] = field(default_factory=dict)
+    field_mapping: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     histories: list[Path] = field(default_factory=list)
     current_order: Path | None = None
     causale: str | None = None
@@ -69,6 +83,41 @@ class AppState:
 
 
 STATE = AppState(logger=SessionLogger(LOGS_DIR))
+
+
+def load_mapping_file() -> dict[str, dict[str, list[str]]]:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not MAPPING_PATH.exists():
+        save_mapping_file(DEFAULT_FIELD_MAPPING)
+        return normalize_mapping(DEFAULT_FIELD_MAPPING)
+    with MAPPING_PATH.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    validate_mapping(data)
+    return data
+
+
+def save_mapping_file(mapping: dict[str, dict[str, list[str]]]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with MAPPING_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(mapping, handle, ensure_ascii=False, indent=2)
+
+
+def validate_mapping(mapping: Any) -> None:
+    if not isinstance(mapping, dict):
+        raise ValueError("Mapping non valido: formato non valido")
+    for mapping_type, default_fields in DEFAULT_FIELD_MAPPING.items():
+        section = mapping.get(mapping_type)
+        if not isinstance(section, dict):
+            raise ValueError(f"Mapping non valido: sezione {mapping_type} mancante")
+        for field_name in default_fields:
+            aliases = section.get(field_name)
+            if not isinstance(aliases, list):
+                raise ValueError(f"Mapping non valido: {mapping_type}.{field_name} non valido")
+            if not all(isinstance(alias, str) for alias in aliases):
+                raise ValueError(f"Mapping non valido: {mapping_type}.{field_name} alias non validi")
+
+
+STATE.field_mapping = load_mapping_file()
 
 
 def list_orders() -> dict[str, list[str]]:
@@ -179,10 +228,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                STATE.clients = load_clients(clients_path, STATE.logger)
-                STATE.stock = load_stock(stock_path, STATE.logger)
+                STATE.clients = load_clients(
+                    clients_path, STATE.logger, STATE.field_mapping.get("CLIENTI", {})
+                )
+                STATE.stock = load_stock(
+                    stock_path, STATE.logger, STATE.field_mapping.get("STOCK", {})
+                )
                 self._send_json(
                     {"success": True, "message": "Clienti e stock caricati"},
+                )
+            except (MappingError, DataError) as exc:
+                STATE.logger.error("Errore mapping", error_type="mapping_error", details=exc.details)
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "mapping_or_data_error",
+                        "message": str(exc),
+                        "details": exc.details,
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
                 )
             except Exception as exc:
                 STATE.logger.error("Errore caricamento default", error=str(exc))
@@ -299,8 +363,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 sconti = load_json(CONFIG_DIR / "sconti_2026.json")
                 category_map = load_json(CONFIG_DIR / "category_map.json")
-                historical_items = load_orders(STATE.histories, STATE.logger)
-                current_items = load_orders([STATE.current_order], STATE.logger)
+                historical_items = load_orders(
+                    STATE.histories, STATE.logger, STATE.field_mapping.get("ORDINI", {})
+                )
+                current_items = load_orders(
+                    [STATE.current_order], STATE.logger, STATE.field_mapping.get("ORDINI", {})
+                )
                 client = STATE.selected_client()
                 if client is None:
                     raise ValueError("Cliente non selezionato")
@@ -333,6 +401,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                     for row in STATE.upsell_rows
                 ]
                 self._send_json({"success": True, "rows": rows, "copy_block": STATE.copy_block})
+            except (MappingError, DataError) as exc:
+                STATE.logger.error("Errore mapping", error_type="mapping_error", details=exc.details)
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "mapping_or_data_error",
+                        "message": str(exc),
+                        "details": exc.details,
+                    },
+                    status=HTTPStatus.BAD_REQUEST,
+                )
             except Exception as exc:
                 STATE.logger.error("Errore calcolo upsell", error=str(exc))
                 self._send_json(
@@ -375,6 +454,129 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 STATE.logger.error("Errore apertura output", error=str(exc))
             self._send_json({"success": True})
+            return
+
+        if self.path == "/api/mapping/get":
+            self._send_json({"ok": True, "mapping": STATE.field_mapping})
+            return
+
+        if self.path == "/api/mapping/load":
+            try:
+                STATE.field_mapping = load_mapping_file()
+                self._send_json({"ok": True, "mapping": STATE.field_mapping})
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": "invalid_mapping", "message": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            return
+
+        if self.path == "/api/mapping/save":
+            incoming = payload.get("mapping", payload)
+            try:
+                validate_mapping(incoming)
+                STATE.field_mapping = incoming
+                save_mapping_file(incoming)
+                self._send_json({"ok": True, "mapping": STATE.field_mapping})
+            except Exception as exc:
+                self._send_json(
+                    {"ok": False, "error": "invalid_mapping", "message": str(exc)},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+            return
+
+        if self.path == "/api/mapping/reset":
+            STATE.field_mapping = normalize_mapping(DEFAULT_FIELD_MAPPING)
+            save_mapping_file(STATE.field_mapping)
+            self._send_json({"ok": True, "mapping": STATE.field_mapping})
+            return
+
+        if self.path == "/api/mapping/test":
+            incoming = payload.get("mapping")
+            mapping = STATE.field_mapping
+            if incoming is not None:
+                try:
+                    validate_mapping(incoming)
+                    mapping = incoming
+                except Exception as exc:
+                    self._send_json(
+                        {"ok": False, "error": "invalid_mapping", "message": str(exc)},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+            results: dict[str, Any] = {"ORDINI": [], "STOCK": [], "CLIENTI": []}
+            missing_files: list[str] = []
+
+            order_files = [path for path in STATE.histories if path is not None]
+            if STATE.current_order is not None:
+                order_files.append(STATE.current_order)
+            if not order_files:
+                order_files = list(ORDERS_DIR.glob("*.xlsx"))[:1]
+            if not order_files:
+                missing_files.append("ORDINI/*.xlsx")
+
+            for path in order_files:
+                if not path.exists():
+                    missing_files.append(path.name)
+                    continue
+                headers = read_headers(path)
+                matches, _ = match_mapping(headers, mapping.get("ORDINI", {}))
+                missing_required = [
+                    field for field in REQUIRED_FIELDS["ORDINI"] if not matches.get(field)
+                ]
+                results["ORDINI"].append(
+                    {
+                        "file": path.name,
+                        "matches": matches,
+                        "missing_required": missing_required,
+                    }
+                )
+
+            clients_path = IMPORT_DIR / "CLIENTI.xlsx"
+            if clients_path.exists():
+                headers = read_headers(clients_path)
+                matches, _ = match_mapping(headers, mapping.get("CLIENTI", {}))
+                missing_required = [
+                    field for field in REQUIRED_FIELDS["CLIENTI"] if not matches.get(field)
+                ]
+                results["CLIENTI"].append(
+                    {
+                        "file": clients_path.name,
+                        "matches": matches,
+                        "missing_required": missing_required,
+                    }
+                )
+            else:
+                missing_files.append("CLIENTI.xlsx")
+
+            stock_path = IMPORT_DIR / "STOCK.xlsx"
+            if stock_path.exists():
+                headers = read_headers(stock_path)
+                matches, _ = match_mapping(headers, mapping.get("STOCK", {}))
+                missing_required = [
+                    field for field in REQUIRED_FIELDS["STOCK"] if not matches.get(field)
+                ]
+                has_listino = any(matches.get(field) for field in STOCK_LISTINO_FIELDS)
+                if not has_listino:
+                    missing_required.append("listino_ri|listino_ri10|listino_di")
+                results["STOCK"].append(
+                    {
+                        "file": stock_path.name,
+                        "matches": matches,
+                        "missing_required": missing_required,
+                    }
+                )
+            else:
+                missing_files.append("STOCK.xlsx")
+
+            if missing_files:
+                self._send_json(
+                    {"ok": False, "error": "missing_files", "missing": missing_files, "results": results},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+
+            self._send_json({"ok": True, "results": results})
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
