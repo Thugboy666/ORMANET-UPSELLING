@@ -26,9 +26,9 @@ from app.engine import (
     compute_upsell,
     export_excel,
     get_required_ric,
+    get_fixed_discount,
     load_json,
     map_macro_category,
-    pick_listino_value,
 )
 from app.io_loaders import (
     DEFAULT_FIELD_MAPPING,
@@ -150,8 +150,9 @@ def build_copy_block(rows: list[UpsellRow], client: ClientInfo, order_name: str,
     ]
     for row in rows:
         lines.append(
-            f"- {row.codice} | {row.descrizione} | {row.qty} | {row.prezzo_unit:.2f} | "
-            f"Sconto% {row.applied_discount_percent:.2f} | Ric% {row.final_ric_percent:.2f} | "
+            f"- {row.codice} | {row.descrizione} | {row.qty} | LM {row.lm:.2f} | "
+            f"Sconto% {row.desired_discount_percent:.2f} | Prezzo {row.prezzo_unit:.2f} | "
+            f"Ric% {row.final_ric_percent:.2f} | "
             f"Ric min% {row.required_ric:.2f} | {row.totale:.2f} | Disp {row.disp} | "
             f"Disponibile dal {row.disponibile_dal or '-'} | Note {row.clamp_reason or '-'}"
         )
@@ -165,8 +166,11 @@ def serialize_rows(rows: list[UpsellRow]) -> list[dict[str, Any]]:
             "descrizione": row.descrizione,
             "qty": row.qty,
             "prezzo_unit": row.prezzo_unit,
-            "listino_value": row.listino_value,
-            "baseline_price": row.baseline_price,
+            "lm": row.lm,
+            "macro_categoria": row.macro_categoria,
+            "fixed_discount_percent": row.fixed_discount_percent,
+            "customer_base_price": row.customer_base_price,
+            "desired_discount_percent": row.desired_discount_percent,
             "applied_discount_percent": row.applied_discount_percent,
             "final_ric_percent": row.final_ric_percent,
             "required_ric": row.required_ric,
@@ -588,15 +592,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if client is None:
                     raise ValueError("Cliente non selezionato")
                 required_ric = get_required_ric(macro, client.listino, sconti)
-                listino_value = pick_listino_value(stock_item, client.listino)
-                min_unit_price = listino_value * (1 + required_ric / 100)
+                if stock_item.lm <= 0:
+                    raise ValueError("LM mancante")
+                fixed_discount = get_fixed_discount(macro, client.listino, sconti)
+                customer_base_price = stock_item.lm * (1 - fixed_discount / 100)
+                min_unit_price = stock_item.lm * (1 + required_ric / 100)
                 self._send_json(
                     {
                         "ok": True,
                         "sku": sku,
                         "min_unit_price": min_unit_price,
                         "required_ric": required_ric,
-                        "listino_value": listino_value,
+                        "lm": stock_item.lm,
+                        "fixed_discount_percent": fixed_discount,
+                        "customer_base_price": customer_base_price,
                     }
                 )
             except Exception as exc:

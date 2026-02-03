@@ -74,6 +74,11 @@
     "listino_di": [
       "L-DI",
       "Listino DI"
+    ],
+    "lm": [
+      "LM",
+      "Listino madre",
+      "Listino Madre"
     ]
   },
   "STOCK": {
@@ -118,6 +123,11 @@
     ],
     "listino_di": [
       "Listino DI"
+    ],
+    "lm": [
+      "LM",
+      "Listino madre",
+      "Listino Madre"
     ]
   },
   "CLIENTI": {
