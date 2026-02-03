@@ -275,6 +275,32 @@ HTML = """
         border-radius: 8px;
         padding: 12px;
       }
+      .summary-panel {
+        border: 1px solid #c7d7e6;
+        background: #f5f9ff;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+      }
+      .summary-panel.error {
+        border-color: #f3b1b1;
+        background: #fff0f0;
+      }
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px;
+        font-size: 13px;
+      }
+      .summary-discrepancies {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #9b0000;
+      }
+      .summary-discrepancies ul {
+        margin: 6px 0 0;
+        padding-left: 20px;
+      }
       .alt-suggestions {
         display: grid;
         gap: 12px;
@@ -540,7 +566,7 @@ HTML = """
               Modalità ALTOVENDENTI
             </label>
             <div class="info" id="altModeInfo">PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.</div>
-            <div class="info">Quando attivo ALT, il prezzo promo è manuale e non applica sconti.</div>
+            <div class="info">Quando attivo ALT, il prezzo promo è fisso (da STOCK) e non applica sconti.</div>
           </div>
           <div class="actions inline">
             <button id="recalcBtn">Ricalcola</button>
@@ -585,6 +611,11 @@ HTML = """
           <h4>Suggerimenti ALT</h4>
           <div class="info" id="altSuggestionsInfo"></div>
           <div class="alt-suggestions" id="altSuggestions"></div>
+        </div>
+        <div class="summary-panel" id="totalsPanel">
+          <h4>Riepilogo preventivo</h4>
+          <div class="summary-grid" id="totalsGrid"></div>
+          <div class="summary-discrepancies" id="totalsDiscrepancies" style="display:none"></div>
         </div>
         <div class="error" id="validationBox"></div>
         <div class="warning" id="warningBox"></div>
@@ -723,6 +754,9 @@ HTML = """
       const resultsBody = document.getElementById("resultsBody");
       const validationBox = document.getElementById("validationBox");
       const warningBox = document.getElementById("warningBox");
+      const totalsPanel = document.getElementById("totalsPanel");
+      const totalsGrid = document.getElementById("totalsGrid");
+      const totalsDiscrepancies = document.getElementById("totalsDiscrepancies");
       const clampBanner = document.getElementById("clampBanner");
       const ricOverrideBanner = document.getElementById("ricOverrideBanner");
       const mappingBtn = document.getElementById("mappingBtn");
@@ -1379,6 +1413,53 @@ HTML = """
         });
       }
 
+      function formatNumber(value, digits = 2) {
+        if (value === null || value === undefined || Number.isNaN(value)) {
+          return "-";
+        }
+        return Number(value).toFixed(digits);
+      }
+
+      function renderTotals(totals, discrepancies, hasBlocking) {
+        totalsGrid.innerHTML = "";
+        totalsPanel.classList.toggle("error", Boolean(hasBlocking));
+        const items = [
+          ["Totale righe", totals?.lines_count ?? "-"],
+          ["Totale pezzi", totals?.total_qty ?? "-"],
+          ["Totale imponibile (finale)", formatNumber(totals?.subtotal_final_exvat)],
+          ["Totale imponibile ALT", formatNumber(totals?.subtotal_alt_exvat)],
+          ["Totale imponibile NON-ALT", formatNumber(totals?.subtotal_non_alt_final_exvat)],
+          ["Totale baseline NON-ALT", formatNumber(totals?.subtotal_baseline_exvat)],
+          ["Risparmio vs baseline (NON-ALT)", formatNumber(totals?.savings_vs_baseline_exvat)],
+          ["Sconto medio pesato NON-ALT (%)", formatNumber(totals?.avg_discount_non_alt_pct)],
+          [
+            "Ric% NON-ALT (min/medio/max)",
+            `${formatNumber(totals?.min_final_ric_non_alt)} / ${formatNumber(totals?.avg_final_ric_non_alt)} / ${formatNumber(totals?.max_final_ric_non_alt)}`
+          ]
+        ];
+        items.forEach(([label, value]) => {
+          const div = document.createElement("div");
+          div.innerHTML = `<strong>${label}:</strong> ${value}`;
+          totalsGrid.appendChild(div);
+        });
+        const issues = discrepancies || [];
+        if (issues.length) {
+          totalsDiscrepancies.style.display = "";
+          const list = issues.slice(0, 6);
+          const remaining = issues.length - list.length;
+          const itemsHtml = list
+            .map((issue) => `<li>${issue.message || issue}</li>`)
+            .join("");
+          totalsDiscrepancies.innerHTML = `
+            <strong>NON QUADRA:</strong>
+            <ul>${itemsHtml}${remaining > 0 ? `<li>+${remaining} altre</li>` : ""}</ul>
+          `;
+        } else {
+          totalsDiscrepancies.style.display = "none";
+          totalsDiscrepancies.innerHTML = "";
+        }
+      }
+
       function renderTable(rows, validation) {
         resultsBody.innerHTML = "";
         lastQuoteRows = rows || [];
@@ -1479,7 +1560,7 @@ HTML = """
           tr.appendChild(basePriceCell);
 
           const floorPriceCell = document.createElement("td");
-          floorPriceCell.textContent = Number(row.min_unit_price).toFixed(2);
+          floorPriceCell.textContent = formatNumber(row.min_unit_price);
           tr.appendChild(floorPriceCell);
 
           const discountCell = document.createElement("td");
@@ -1534,12 +1615,14 @@ HTML = """
           tr.appendChild(ricCell);
 
           const ricMinCell = document.createElement("td");
-          ricMinCell.textContent = Number(row.required_ric).toFixed(2);
+          ricMinCell.textContent = formatNumber(row.required_ric);
           tr.appendChild(ricMinCell);
 
           const noteCell = document.createElement("td");
           if (row.clamp_reason === "MIN_RIC_FLOOR") {
             noteCell.textContent = `Sconto bloccato: pavimento RIC minimo ${Number(row.required_ric).toFixed(2)}% (prezzo minimo=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)})`;
+          } else if (row.clamp_reason === "ALT_LOCKED") {
+            noteCell.textContent = row.note || "ALT: prezzo promo fisso (non scontabile)";
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
           } else if (row.note) {
@@ -1722,6 +1805,7 @@ HTML = """
         setValidation(lastValidation.ok ? "" : `Errore ric minimo: ${validationErrors}`);
         const warnings = (res.warnings || []).join(" | ");
         setWarning(warnings);
+        renderTotals(res.totals || {}, res.discrepancies || [], res.has_blocking_issues);
         const hasClamp = (res.quote || []).some((row) => row.clamp_reason === "MIN_RIC_FLOOR");
         if (hasClamp) {
           const maxDiscountReal = pricingLimits.max_discount_real_min;

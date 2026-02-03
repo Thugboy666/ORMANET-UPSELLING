@@ -509,16 +509,90 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
     if client is None:
         raise ValueError("Cliente non selezionato")
     STATE.copy_block = build_copy_block(STATE.upsell_rows, client, order_name, STATE.causale or "")
+    rows = STATE.upsell_rows
+    non_alt_rows = [row for row in rows if row.clamp_reason != "ALT_LOCKED"]
+    alt_rows = [row for row in rows if row.clamp_reason == "ALT_LOCKED"]
+    totals_lines = len(rows)
+    total_qty = sum(row.qty for row in rows)
+    subtotal_final_exvat = sum(row.prezzo_unit * row.qty for row in rows)
+    subtotal_alt_exvat = sum(row.prezzo_unit * row.qty for row in alt_rows)
+    subtotal_non_alt_final_exvat = sum(row.prezzo_unit * row.qty for row in non_alt_rows)
+    subtotal_baseline_exvat = sum(row.customer_base_price * row.qty for row in non_alt_rows)
+    savings_vs_baseline_exvat = subtotal_baseline_exvat - subtotal_non_alt_final_exvat
+    avg_discount_non_alt_pct = (
+        savings_vs_baseline_exvat / subtotal_baseline_exvat * 100
+        if subtotal_baseline_exvat
+        else 0.0
+    )
+    non_alt_ric_values = [row.final_ric_percent for row in non_alt_rows]
+    min_final_ric_non_alt = min(non_alt_ric_values) if non_alt_ric_values else None
+    max_final_ric_non_alt = max(non_alt_ric_values) if non_alt_ric_values else None
+    avg_final_ric_non_alt = (
+        sum(row.final_ric_percent * row.qty for row in non_alt_rows)
+        / sum(row.qty for row in non_alt_rows)
+        if non_alt_rows
+        else None
+    )
+    discrepancies: list[dict[str, Any]] = []
+    for row in non_alt_rows:
+        if row.min_unit_price is not None and row.prezzo_unit < row.min_unit_price:
+            discrepancies.append(
+                {
+                    "type": "MIN_RIC_FLOOR",
+                    "sku": row.codice,
+                    "message": (
+                        f"{row.codice}: prezzo {row.prezzo_unit:.2f} sotto minimo "
+                        f"{row.min_unit_price:.2f} (RIC {row.required_ric:.2f}%)."
+                    ),
+                }
+            )
+    for row in rows:
+        if row.alt_selected and not row.alt_available:
+            discrepancies.append(
+                {
+                    "type": "ALT_MISSING",
+                    "sku": row.codice,
+                    "message": f"{row.codice}: ALT selezionato ma PREZZO_ALT assente.",
+                }
+            )
+    for row in alt_rows:
+        if row.prezzo_alt is not None and abs(row.prezzo_unit - row.prezzo_alt) > 0.001:
+            discrepancies.append(
+                {
+                    "type": "ALT_MISMATCH",
+                    "sku": row.codice,
+                    "message": (
+                        f"{row.codice}: prezzo ALT attivo ma prezzo finale {row.prezzo_unit:.2f} "
+                        f"diverso da PREZZO_ALT {row.prezzo_alt:.2f}."
+                    ),
+                }
+            )
+    has_blocking_issues = bool(discrepancies)
     response = {
         "ok": True,
         "success": True,
-        "quote": serialize_rows(STATE.upsell_rows),
+        "quote": serialize_rows(rows),
         "pricing_rows": serialize_pricing_rows(STATE.pricing_rows),
         "trace": STATE.trace,
         "warnings": STATE.warnings,
         "validation": STATE.validation,
         "ric_override_errors": STATE.ric_override_errors,
         "copy_block": STATE.copy_block,
+        "totals": {
+            "lines_count": totals_lines,
+            "total_qty": total_qty,
+            "subtotal_final_exvat": subtotal_final_exvat,
+            "subtotal_baseline_exvat": subtotal_baseline_exvat,
+            "subtotal_alt_exvat": subtotal_alt_exvat,
+            "subtotal_non_alt_final_exvat": subtotal_non_alt_final_exvat,
+            "savings_vs_baseline_exvat": savings_vs_baseline_exvat,
+            "avg_discount_non_alt_pct": avg_discount_non_alt_pct,
+            "min_final_ric_non_alt": min_final_ric_non_alt,
+            "avg_final_ric_non_alt": avg_final_ric_non_alt,
+            "max_final_ric_non_alt": max_final_ric_non_alt,
+        },
+        "discrepancies": discrepancies,
+        "has_blocking_issues": has_blocking_issues,
         "pricing": {
             "aggressivity": STATE.pricing.aggressivity,
             "aggressivity_mode": STATE.pricing.aggressivity_mode,
