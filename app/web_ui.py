@@ -470,8 +470,8 @@ HTML = """
             </label>
           </div>
           <div>
-            <label for="maxDiscount" title="Cap massimo aggiuntivo, non può superare il max reale calcolato.">
-              Max sconto (%)
+            <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
+              Max sconto (utente) (%)
             </label>
             <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
             <div class="info" id="maxDiscountHint"></div>
@@ -517,6 +517,7 @@ HTML = """
                 <th>Prezzo baseline (RIC.BASE)</th>
                 <th>Prezzo minimo (RIC minimo)</th>
                 <th>Sconto richiesto (%)</th>
+                <th>Sconto cap (%)</th>
                 <th>Sconto effettivo (%)</th>
                 <th>Prezzo finale</th>
                 <th>Ric % finale</th>
@@ -736,6 +737,7 @@ HTML = """
       let perRowOverrides = {};
       let lastValidation = { ok: true, errors: [] };
       let lastQuoteRows = [];
+      let lastPricingRows = [];
       let ricRows = [];
       let ricOverrideEnabled = false;
       let ricItemExceptions = [];
@@ -1235,18 +1237,9 @@ HTML = """
             : minLimit;
           const varies = Math.abs(minLimit - maxLimit) > 0.01;
           const hintSuffix = varies ? " (varia per riga)" : "";
-          const limit = minLimit;
-          maxDiscount.max = limit;
-          maxDiscountHint.textContent = `Sconto massimo consentito: ${limit.toFixed(2)}%${hintSuffix}`;
-          const currentValue = Number(globalParams.max_discount_percent ?? limit);
-          const shouldClamp = currentValue > limit;
-          if (updateMaxDiscount && (!maxDiscountManuallySet || shouldClamp)) {
-            globalParams.max_discount_percent = shouldClamp ? limit : currentValue;
-            maxDiscount.value = Number(globalParams.max_discount_percent).toFixed(2);
-          }
+          maxDiscountHint.textContent = `Cap minimo tra righe (info): ${minLimit.toFixed(2)}%${hintSuffix}`;
         } else {
           maxDiscountHint.textContent = "";
-          maxDiscount.removeAttribute("max");
         }
         if (!bufferRicOverrideToggle.checked && pricingLimits.buffer_ric_example !== null) {
           globalParams.buffer_ric = Number(pricingLimits.buffer_ric_example);
@@ -1257,6 +1250,7 @@ HTML = """
       function renderTable(rows, validation) {
         resultsBody.innerHTML = "";
         lastQuoteRows = rows || [];
+        const pricingByCode = new Map((lastPricingRows || []).map((row) => [row.codice, row]));
         const errorSkus = new Set((validation?.errors || []).map((err) => err.sku));
         rows.forEach((row) => {
           const tr = document.createElement("tr");
@@ -1346,8 +1340,17 @@ HTML = """
           discountCell.appendChild(discountInput);
           tr.appendChild(discountCell);
 
+          const capCell = document.createElement("td");
+          const pricingRow = pricingByCode.get(row.codice);
+          const capValue = pricingRow?.sconto_cap ?? row.max_discount_real_pct;
+          capCell.textContent = capValue !== undefined && capValue !== null
+            ? Number(capValue).toFixed(2)
+            : "";
+          tr.appendChild(capCell);
+
           const appliedDiscountCell = document.createElement("td");
-          appliedDiscountCell.textContent = Number(row.applied_discount_pct).toFixed(2);
+          const effectiveValue = pricingRow?.sconto_effettivo ?? row.applied_discount_pct;
+          appliedDiscountCell.textContent = Number(effectiveValue).toFixed(2);
           tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
@@ -1536,13 +1539,7 @@ HTML = """
         copyBlock = res.copy_block || copyBlock;
         lastValidation = res.validation || { ok: true, errors: [] };
         pricingLimits = res.pricing_limits || pricingLimits;
-        if (res.global_max_sconto_used_pct !== undefined && res.global_max_sconto_used_pct !== null) {
-          const allowedValue = Number(res.global_max_sconto_used_pct);
-          const shouldClamp = Number(globalParams.max_discount_percent ?? allowedValue) > allowedValue;
-          if (!maxDiscountManuallySet || shouldClamp) {
-            globalParams.max_discount_percent = allowedValue;
-          }
-        }
+        lastPricingRows = res.pricing_rows || [];
         const validationErrors = (lastValidation.errors || [])
           .map((err) => `${err.sku}: minimo ${Number(err.min_unit_price).toFixed(2)}`)
           .join(" | ");
@@ -1675,14 +1672,6 @@ HTML = """
 
       maxDiscount.addEventListener("change", () => {
         let value = Number(maxDiscount.value);
-        if (maxDiscount.max) {
-          const maxAllowed = Number(maxDiscount.max);
-          if (value > maxAllowed) {
-            value = maxAllowed;
-            maxDiscount.value = maxAllowed.toFixed(2);
-            setInfo(`Cap sconto ridotto al massimo consentito (${maxAllowed.toFixed(2)}%).`);
-          }
-        }
         maxDiscountManuallySet = true;
         globalParams.max_discount_percent = value;
         scheduleRecalc();
