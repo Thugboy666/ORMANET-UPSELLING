@@ -272,12 +272,6 @@ HTML = """
       .alt-column.hidden {
         display: none;
       }
-      .alt-panel {
-        border: 1px solid #f0d6bf;
-        background: #fffaf5;
-        border-radius: 8px;
-        padding: 12px;
-      }
       .summary-panel {
         border: 1px solid #c7d7e6;
         background: #f5f9ff;
@@ -304,30 +298,22 @@ HTML = """
         margin: 6px 0 0;
         padding-left: 20px;
       }
-      .alt-suggestions {
-        display: grid;
-        gap: 12px;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      }
-      .alt-card {
-        border: 1px solid #f0d6bf;
+      .advanced-panel {
+        border: 1px dashed #f0d6bf;
         border-radius: 8px;
-        padding: 10px;
-        background: #ffffff;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
+        padding: 8px 10px;
+        background: #fffaf5;
       }
-      .alt-card h4 {
-        margin: 0;
-        font-size: 14px;
+      .advanced-panel summary {
+        cursor: pointer;
+        font-weight: 700;
+        color: #7a2d00;
       }
-      .alt-card .meta {
-        font-size: 12px;
-        color: #444;
-      }
-      .alt-card .actions {
-        margin-top: 0;
+      .advanced-content {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+        margin-top: 8px;
       }
       .warning {
         color: #7a2d00;
@@ -535,22 +521,11 @@ HTML = """
             </select>
           </div>
           <div>
-            <label for="bufferRic">Buffer ric (%)</label>
-            <input type="number" id="bufferRic" min="0" step="0.1" value="2" readonly />
-            <label class="inline-toggle">
-              <input type="checkbox" id="bufferRicOverrideToggle" />
-              Override avanzato
-            </label>
-          </div>
-          <div>
             <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
               Max sconto (utente) (%)
             </label>
             <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
             <div class="info" id="maxDiscountHint"></div>
-            <div class="actions inline">
-              <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
-            </div>
           </div>
           <div>
             <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
@@ -571,6 +546,25 @@ HTML = """
             <div class="info" id="altModeInfo">PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.</div>
             <div class="info">Quando attivo ALT, il prezzo promo è fisso (da STOCK) e non applica sconti.</div>
           </div>
+          <details class="advanced-panel">
+            <summary>Avanzate</summary>
+            <div class="advanced-content">
+              <div>
+                <label for="bufferRic">Buffer ric (%)</label>
+                <input type="number" id="bufferRic" min="0" step="0.1" value="2" readonly />
+                <label class="inline-toggle">
+                  <input type="checkbox" id="bufferRicOverrideToggle" />
+                  Override avanzato
+                </label>
+              </div>
+              <div>
+                <label>Cap sconto</label>
+                <div class="actions inline">
+                  <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
+                </div>
+              </div>
+            </div>
+          </details>
           <div class="actions inline">
             <button id="recalcBtn">Ricalcola</button>
             <button id="resetOverridesBtn" class="secondary">Reset override</button>
@@ -609,11 +603,6 @@ HTML = """
             </thead>
             <tbody id="resultsBody"></tbody>
           </table>
-        </div>
-        <div class="alt-panel" id="altPanel" style="display:none">
-          <h4>Suggerimenti ALT</h4>
-          <div class="info" id="altSuggestionsInfo"></div>
-          <div class="alt-suggestions" id="altSuggestions"></div>
         </div>
         <div class="summary-panel" id="totalsPanel">
           <h4>Riepilogo preventivo</h4>
@@ -792,9 +781,6 @@ HTML = """
       const traceRows = document.getElementById("traceRows");
       const altModeToggle = document.getElementById("altModeToggle");
       const altModeInfo = document.getElementById("altModeInfo");
-      const altPanel = document.getElementById("altPanel");
-      const altSuggestions = document.getElementById("altSuggestions");
-      const altSuggestionsInfo = document.getElementById("altSuggestionsInfo");
       const ricParamsBtn = document.getElementById("ricParamsBtn");
       const ricModal = document.getElementById("ricModal");
       const closeRic = document.getElementById("closeRic");
@@ -844,8 +830,8 @@ HTML = """
       let ricItemExceptions = [];
       let activeRicTab = "category";
       let maxDiscountManuallySet = false;
-      let altSuggestionsData = [];
       let altAvailableCount = 0;
+      let causaleInitialized = false;
 
       const requiredFields = {
         ORDINI: ["codice", "qty", "prezzo_unit_exvat"],
@@ -1356,64 +1342,6 @@ HTML = """
         document.querySelectorAll(".alt-column").forEach((cell) => {
           cell.classList.toggle("hidden", !showAlt);
         });
-        altPanel.style.display = showAlt ? "" : "none";
-      }
-
-      function renderAltSuggestions(list) {
-        altSuggestions.innerHTML = "";
-        altSuggestionsData = list || [];
-        if (!globalParams.alt_mode) {
-          altSuggestionsInfo.textContent = "";
-          return;
-        }
-        if (!altSuggestionsData.length) {
-          altSuggestionsInfo.textContent = "Nessun suggerimento ALT disponibile.";
-          return;
-        }
-        altSuggestionsInfo.textContent = "";
-        altSuggestionsData.forEach((item) => {
-          const card = document.createElement("div");
-          card.className = "alt-card";
-          const title = document.createElement("h4");
-          title.textContent = `${item.codice} — ${item.descrizione}`;
-          card.appendChild(title);
-
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          meta.innerHTML = `Categoria: ${item.categoria || "-"}<br>Prezzo ALT: ${Number(item.prezzo_alt).toFixed(2)}`;
-          card.appendChild(meta);
-
-          const qtyLabel = document.createElement("label");
-          qtyLabel.textContent = "Qty suggerita";
-          const qtyInput = document.createElement("input");
-          qtyInput.type = "number";
-          qtyInput.min = "1";
-          qtyInput.step = "1";
-          qtyInput.value = item.qty || 1;
-          card.appendChild(qtyLabel);
-          card.appendChild(qtyInput);
-
-          const actions = document.createElement("div");
-          actions.className = "actions";
-          const addBtn = document.createElement("button");
-          addBtn.type = "button";
-          addBtn.textContent = "Aggiungi al preventivo";
-          addBtn.addEventListener("click", async () => {
-            setError("");
-            const res = await api("/api/alt/add", {
-              sku: item.codice,
-              qty: Number(qtyInput.value)
-            });
-            if (res.ok === false) {
-              setError(res.error || "Errore aggiunta ALT");
-              return;
-            }
-            applyQuoteResponse(res);
-          });
-          actions.appendChild(addBtn);
-          card.appendChild(actions);
-          altSuggestions.appendChild(card);
-        });
       }
 
       function formatNumber(value, digits = 2) {
@@ -1441,20 +1369,16 @@ HTML = """
         totalsGrid.innerHTML = "";
         totalsPanel.classList.toggle("error", Boolean(hasBlocking));
         const items = [
-          ["Righe", totals?.lines_count ?? "–"],
-          ["Pezzi totali", totals?.total_qty ?? "–"],
-          ["Totale imponibile", formatCurrency(totals?.subtotal_final_exvat)],
-          ["Totale ALT (imponibile)", formatCurrency(totals?.subtotal_alt_exvat)],
-          ["Totale NON-ALT (imponibile)", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
+          ["Totale NON-ALT", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
+          ["Totale ALT", formatCurrency(totals?.subtotal_alt_exvat)],
+          ["Totale complessivo", formatCurrency(totals?.subtotal_final_exvat)],
           [
-            "Risparmio vs baseline (solo NON-ALT)",
+            "Risparmio vs baseline (NON-ALT)",
             formatCurrency(totals?.savings_vs_baseline_non_alt_exvat)
           ],
-          ["Margini NON-ALT", ""],
-          ["RIC% medio", formatPercent(totals?.avg_final_ric_non_alt)],
           [
-            "RIC% min / max",
-            `${formatPercent(totals?.min_final_ric_non_alt)} / ${formatPercent(totals?.max_final_ric_non_alt)}`
+            "RIC% NON-ALT (min/medio/max)",
+            `${formatPercent(totals?.min_final_ric_non_alt)} / ${formatPercent(totals?.avg_final_ric_non_alt)} / ${formatPercent(totals?.max_final_ric_non_alt)}`
           ]
         ];
         items.forEach(([label, value]) => {
@@ -1580,19 +1504,19 @@ HTML = """
           tr.appendChild(lmCell);
 
           const fixedDiscountCell = document.createElement("td");
-          fixedDiscountCell.textContent = Number(row.fixed_discount_percent).toFixed(2);
+          fixedDiscountCell.textContent = isAltLocked ? "–" : Number(row.fixed_discount_percent).toFixed(2);
           tr.appendChild(fixedDiscountCell);
 
           const ricBasePercentCell = document.createElement("td");
-          ricBasePercentCell.textContent = Number(row.ric_base).toFixed(2);
+          ricBasePercentCell.textContent = isAltLocked ? "–" : Number(row.ric_base).toFixed(2);
           tr.appendChild(ricBasePercentCell);
 
           const basePriceCell = document.createElement("td");
-          basePriceCell.textContent = Number(row.customer_base_price).toFixed(2);
+          basePriceCell.textContent = isAltLocked ? "–" : Number(row.customer_base_price).toFixed(2);
           tr.appendChild(basePriceCell);
 
           const floorPriceCell = document.createElement("td");
-          floorPriceCell.textContent = formatNumber(row.min_unit_price);
+          floorPriceCell.textContent = isAltLocked ? "–" : formatNumber(row.min_unit_price);
           tr.appendChild(floorPriceCell);
 
           const discountCell = document.createElement("td");
@@ -1653,11 +1577,11 @@ HTML = """
           tr.appendChild(priceCell);
 
           const ricCell = document.createElement("td");
-          ricCell.textContent = Number(row.final_ric_percent).toFixed(2);
+          ricCell.textContent = isAltLocked ? "–" : Number(row.final_ric_percent).toFixed(2);
           tr.appendChild(ricCell);
 
           const ricMinCell = document.createElement("td");
-          ricMinCell.textContent = formatNumber(row.required_ric);
+          ricMinCell.textContent = isAltLocked ? "–" : formatNumber(row.required_ric);
           tr.appendChild(ricMinCell);
 
           const noteCell = document.createElement("td");
@@ -1780,6 +1704,12 @@ HTML = """
         if (status.causale) {
           causaleSelect.value = status.causale;
         }
+        if (!status.causale && !causaleInitialized) {
+          causaleInitialized = true;
+          await api("/api/set_causale", { causale: causaleSelect.value });
+          await refreshStatus();
+          return;
+        }
         if (status.pricing) {
           globalParams = {
             aggressivity: status.pricing.aggressivity ?? globalParams.aggressivity,
@@ -1864,7 +1794,6 @@ HTML = """
         }
         renderTable(res.quote, lastValidation);
         renderTrace(res.trace || {});
-        renderAltSuggestions(res.alt_suggestions || []);
         updateAltVisibility();
         if (res.ric_override_errors && res.ric_override_errors.length) {
           setRicOverrideBanner(res.ric_override_errors.join(" | "));
@@ -2007,8 +1936,6 @@ HTML = """
         updateAltVisibility();
         if (lastQuoteRows.length) {
           await recalcQuote();
-        } else {
-          renderAltSuggestions([]);
         }
       });
 

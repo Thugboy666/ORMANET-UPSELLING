@@ -605,37 +605,32 @@ def compute_upsell(
         alt_missing_note = None
         if alt_selected and not alt_available:
             warnings.append(f"{item.codice}: PREZZO_ALT mancante, ALT disattivato.")
-            alt_missing_note = "ALT: PREZZO_ALT mancante"
+            alt_missing_note = "ALT non disponibile su stock"
             alt_selected = False
+        alt_locked = alt_selected and alt_available
+
         lm_effective = lm_value
-        if alt_selected and alt_available and not lock_override:
-            # ALT: LM virtuale = PREZZO_ALT per il calcolo di RIC.BASE e prezzi.
-            lm_effective = float(alt_price)
         lm_effective_source = lm_source
-        if alt_selected and alt_available and not lock_override:
+        if alt_locked:
+            lm_effective = float(alt_price)
             lm_effective_source = "alt_virtual"
-        pricing_payload, clamp_reason = apply_pricing_pipeline(
-            lm=lm_effective,
-            ric_base=ric_base,
-            ric_floor=ric_floor,
-            aggressivity=pricing.aggressivity,
-            max_discount_percent=pricing.max_discount_percent,
-            rounding=pricing.rounding,
-        )
-        baseline_price = pricing_payload["baseline_price"]
-        floor_price = pricing_payload["floor_price"]
-        max_discount_real = pricing_payload["max_discount_real"]
-        max_discount_real_pct = pricing_payload["max_discount_real_pct"]
-        max_discount_effective = pricing_payload["max_discount_effective"]
-        max_discount_effective_pct = pricing_payload["max_discount_effective_pct"]
-        desired_discount_pct = pricing_payload["desired_discount_pct"]
-        effective_discount_pct = pricing_payload["effective_discount_pct"]
-        candidate_price = pricing_payload["candidate_price"]
-        computed_price = pricing_payload["final_price"]
-        final_ric = pricing_payload["final_ric"]
-        applied_discount_pct = pricing_payload["applied_discount_pct"]
+
+        baseline_price = 0.0
+        floor_price = 0.0
+        max_discount_real = 0.0
+        max_discount_real_pct = 0.0
+        max_discount_effective = 0.0
+        max_discount_effective_pct = 0.0
+        desired_discount_pct = 0.0
+        effective_discount_pct = 0.0
+        candidate_price = 0.0
+        computed_price = 0.0
+        final_ric = 0.0
+        applied_discount_pct = 0.0
         buffer_ric = ric_base - ric_floor
-        if discount_override is not None and not (alt_selected and alt_available and not lock_override):
+        clamp_reason = None
+
+        if not alt_locked:
             pricing_payload, clamp_reason = apply_pricing_pipeline(
                 lm=lm_effective,
                 ric_base=ric_base,
@@ -643,34 +638,60 @@ def compute_upsell(
                 aggressivity=pricing.aggressivity,
                 max_discount_percent=pricing.max_discount_percent,
                 rounding=pricing.rounding,
-                discount_override=discount_override,
             )
+            baseline_price = pricing_payload["baseline_price"]
+            floor_price = pricing_payload["floor_price"]
+            max_discount_real = pricing_payload["max_discount_real"]
+            max_discount_real_pct = pricing_payload["max_discount_real_pct"]
+            max_discount_effective = pricing_payload["max_discount_effective"]
+            max_discount_effective_pct = pricing_payload["max_discount_effective_pct"]
             desired_discount_pct = pricing_payload["desired_discount_pct"]
             effective_discount_pct = pricing_payload["effective_discount_pct"]
+            candidate_price = pricing_payload["candidate_price"]
             computed_price = pricing_payload["final_price"]
             final_ric = pricing_payload["final_ric"]
             applied_discount_pct = pricing_payload["applied_discount_pct"]
-            candidate_price = pricing_payload["candidate_price"]
+            if discount_override is not None:
+                pricing_payload, clamp_reason = apply_pricing_pipeline(
+                    lm=lm_effective,
+                    ric_base=ric_base,
+                    ric_floor=ric_floor,
+                    aggressivity=pricing.aggressivity,
+                    max_discount_percent=pricing.max_discount_percent,
+                    rounding=pricing.rounding,
+                    discount_override=discount_override,
+                )
+                desired_discount_pct = pricing_payload["desired_discount_pct"]
+                effective_discount_pct = pricing_payload["effective_discount_pct"]
+                computed_price = pricing_payload["final_price"]
+                final_ric = pricing_payload["final_ric"]
+                applied_discount_pct = pricing_payload["applied_discount_pct"]
+                candidate_price = pricing_payload["candidate_price"]
 
         final_price = computed_price
         note = alt_missing_note
         min_unit_price = floor_price
         required_ric = ric_floor
-        if alt_selected and alt_available and not lock_override:
+        if alt_locked:
             final_price = round_up_to_step(float(alt_price), pricing.rounding)
             discount_override = None
             unit_price_override = None
-            applied_discount_pct = (
-                (baseline_price - final_price) / baseline_price * 100 if baseline_price else 0.0
-            )
-            applied_discount_pct = max(0.0, min(100.0, applied_discount_pct))
-            desired_discount_pct = applied_discount_pct
-            effective_discount_pct = applied_discount_pct
-            final_ric = (final_price / lm_effective - 1) * 100 if lm_effective else 0.0
+            baseline_price = final_price
+            floor_price = final_price
+            max_discount_real = 0.0
+            max_discount_real_pct = 0.0
+            max_discount_effective = 0.0
+            max_discount_effective_pct = 0.0
+            desired_discount_pct = 0.0
+            effective_discount_pct = 0.0
+            candidate_price = final_price
+            computed_price = final_price
+            final_ric = 0.0
+            applied_discount_pct = 0.0
             clamp_reason = "ALT_LOCKED"
             min_unit_price = None
             required_ric = None
-            note = "ALT: prezzo promo fisso (non scontabile)"
+            note = "ALT: prezzo promo fisso (PREZZO_ALT)"
         if unit_price_override is not None:
             clamp_reason = None
             min_unit_price = floor_price
@@ -723,22 +744,23 @@ def compute_upsell(
                 note=note,
             )
         )
-        pricing_rows.append(
-            build_pricing_row(
-                codice=item.codice,
-                descrizione=item.descrizione,
-                categoria=macro,
-                lm=lm_effective,
-                ric_base=ric_base,
-                ric_min=ric_floor,
-                sconto_fisso=fixed_discount,
-                max_discount_percent=pricing.max_discount_percent,
-                aggressivity=pricing.aggressivity,
-                listino=client.listino,
-                logger=logger,
-                requested_discount_override=discount_override,
+        if not alt_locked:
+            pricing_rows.append(
+                build_pricing_row(
+                    codice=item.codice,
+                    descrizione=item.descrizione,
+                    categoria=macro,
+                    lm=lm_effective,
+                    ric_base=ric_base,
+                    ric_min=ric_floor,
+                    sconto_fisso=fixed_discount,
+                    max_discount_percent=pricing.max_discount_percent,
+                    aggressivity=pricing.aggressivity,
+                    listino=client.listino,
+                    logger=logger,
+                    requested_discount_override=discount_override,
+                )
             )
-        )
         trace_rows.append(
             {
                 "sku": item.codice,
@@ -787,9 +809,13 @@ def compute_upsell(
                 },
                 "history_occurrences": len(historical_by_code.get(item.codice, [])),
                 "formula": (
-                    f"Baseline = LM * (1 + {ric_base:.2f}%) = {baseline_price:.2f}; "
-                    f"Floor = LM * (1 + {ric_floor:.2f}%) = {floor_price:.2f}; "
-                    f"Prezzo finale = max(Baseline * (1 - {effective_discount_pct:.2f}%), Floor)"
+                    "ALT: prezzo promo fisso (PREZZO_ALT)"
+                    if alt_locked
+                    else (
+                        f"Baseline = LM * (1 + {ric_base:.2f}%) = {baseline_price:.2f}; "
+                        f"Floor = LM * (1 + {ric_floor:.2f}%) = {floor_price:.2f}; "
+                        f"Prezzo finale = max(Baseline * (1 - {effective_discount_pct:.2f}%), Floor)"
+                    )
                 ),
             }
         )
