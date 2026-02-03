@@ -98,6 +98,25 @@ class UpsellRow:
 
 
 @dataclass
+class PricingRow:
+    codice: str
+    descrizione: str
+    categoria: str
+    lm: float
+    ric_base: float
+    ric_min: float
+    sconto_fisso: float
+    prezzo_base: float
+    prezzo_min: float
+    sconto_richiesto: float
+    sconto_cap: float
+    sconto_effettivo: float
+    prezzo_finale: float
+    ric_effettivo: float
+    fonte_cap: str | None
+
+
+@dataclass
 class PricingParams:
     aggressivity: float = DEFAULT_AGGRESSIVITY
     aggressivity_mode: str = AGGRESSIVITY_MODES[0]
@@ -214,8 +233,6 @@ def resolve_ric_values(
     listino_key = LISTINO_MAP.get(listino.upper().strip(), "RIV")
     listino_scope = "RIV10" if listino_key == "RIV+10" else listino_key
     defaults = sconti.get(macro, {}).get(listino_key, {})
-    if "ric_base" not in defaults:
-        raise ValueError(f"RIC.BASE mancante per {macro}/{listino_key}")
     ric_exact = float(defaults.get("ric", ABSOLUTE_MIN_MARKUP))
     ric_floor_default = max(ABSOLUTE_MIN_MARKUP, ric_exact)
     ric_floor = ric_floor_default
@@ -226,7 +243,10 @@ def resolve_ric_values(
         if override_floor > ric_floor:
             ric_floor = override_floor
             ric_floor_source = "category_override"
-    ric_base_default = float(defaults.get("ric_base"))
+    ric_base_default = defaults.get("ric_base")
+    if ric_base_default is None:
+        ric_base_default = ric_floor_default
+    ric_base_default = float(ric_base_default)
     category_base = None
     if category_override:
         category_base = max(ric_floor, float(category_override.get("ric_base", ric_base_default)))
@@ -319,15 +339,15 @@ def apply_pricing_pipeline(
     max_discount_real = 1 - (floor_price / baseline_price) if baseline_price else 0.0
     max_discount_real = max(0.0, max_discount_real)
     max_discount_real_pct = max_discount_real * 100
-    max_discount_ui = max_discount_percent if max_discount_percent is not None else max_discount_real_pct
-    max_discount_effective_pct = min(max_discount_real_pct, float(max_discount_ui))
-    max_discount_effective = max_discount_effective_pct / 100
-
     aggressivity_value = aggressivity_to_discount_percent(aggressivity)
-    desired_discount_pct = (aggressivity_value / 100) * max_discount_effective_pct
+    max_discount_ui = max_discount_percent if max_discount_percent is not None else max_discount_real_pct
+    max_discount_ui = max(0.0, float(max_discount_ui))
+    requested_discount_pct = (aggressivity_value / 100) * max_discount_ui
+    effective_discount_pct = min(requested_discount_pct, max_discount_real_pct)
     if discount_override is not None:
-        desired_discount_pct = float(discount_override)
-    candidate_price = baseline_price * (1 - desired_discount_pct / 100)
+        requested_discount_pct = float(discount_override)
+        effective_discount_pct = min(requested_discount_pct, max_discount_real_pct)
+    candidate_price = baseline_price * (1 - effective_discount_pct / 100)
     clamp_reason = None
     if candidate_price < floor_price:
         candidate_price = floor_price
@@ -347,15 +367,86 @@ def apply_pricing_pipeline(
         "floor_price": floor_price,
         "max_discount_real": max_discount_real,
         "max_discount_real_pct": max_discount_real_pct,
-        "max_discount_effective": max_discount_effective,
-        "max_discount_effective_pct": max_discount_effective_pct,
-        "desired_discount_pct": desired_discount_pct,
+        "max_discount_effective": max_discount_real_pct / 100,
+        "max_discount_effective_pct": max_discount_real_pct,
+        "desired_discount_pct": requested_discount_pct,
+        "effective_discount_pct": effective_discount_pct,
         "candidate_price": candidate_price,
         "final_price": final_price,
         "final_ric": final_ric,
         "applied_discount_pct": applied_discount,
     }
     return payload, clamp_reason
+
+
+def build_pricing_row(
+    *,
+    codice: str,
+    descrizione: str,
+    categoria: str,
+    lm: float,
+    ric_base: float,
+    ric_min: float,
+    sconto_fisso: float,
+    max_discount_percent: float | None,
+    aggressivity: float,
+    listino: str,
+    logger: SessionLogger,
+    requested_discount_override: float | None = None,
+) -> PricingRow:
+    prezzo_base = lm * (1 + ric_base / 100)
+    prezzo_min = lm * (1 + ric_min / 100)
+    cap_riga_percent = (
+        max(0.0, (prezzo_base - prezzo_min) / prezzo_base * 100) if prezzo_base else 0.0
+    )
+    aggressivity_value = aggressivity_to_discount_percent(aggressivity)
+    if requested_discount_override is not None:
+        sconto_richiesto = float(requested_discount_override)
+    else:
+        max_discount_ui = max_discount_percent if max_discount_percent is not None else cap_riga_percent
+        max_discount_ui = max(0.0, float(max_discount_ui))
+        sconto_richiesto = max_discount_ui * (aggressivity_value / 100)
+    sconto_effettivo = min(sconto_richiesto, cap_riga_percent)
+    prezzo_finale = prezzo_base * (1 - sconto_effettivo / 100)
+    ric_effettivo = ((prezzo_finale / lm) - 1) * 100 if lm else 0.0
+    fonte_cap = "ric_min" if cap_riga_percent + 1e-9 < sconto_richiesto else None
+    logger.info(
+        "Pricing row %s | cat=%s | listino=%s | LM=%.2f | ric_base=%.2f | ric_min=%.2f | cap=%.2f | richiesto=%.2f | effettivo=%.2f",
+        codice,
+        categoria,
+        listino,
+        lm,
+        ric_base,
+        ric_min,
+        cap_riga_percent,
+        sconto_richiesto,
+        sconto_effettivo,
+    )
+    if fonte_cap:
+        logger.info(
+            "Pricing row clamp %s: cap %.2f < richiesto %.2f (fonte %s)",
+            codice,
+            cap_riga_percent,
+            sconto_richiesto,
+            fonte_cap,
+        )
+    return PricingRow(
+        codice=codice,
+        descrizione=descrizione,
+        categoria=categoria,
+        lm=lm,
+        ric_base=ric_base,
+        ric_min=ric_min,
+        sconto_fisso=sconto_fisso,
+        prezzo_base=prezzo_base,
+        prezzo_min=prezzo_min,
+        sconto_richiesto=sconto_richiesto,
+        sconto_cap=cap_riga_percent,
+        sconto_effettivo=sconto_effettivo,
+        prezzo_finale=prezzo_finale,
+        ric_effettivo=ric_effettivo,
+        fonte_cap=fonte_cap,
+    )
 
 
 def is_available(stock_item: StockItem, causale: str) -> tuple[bool, str | None]:
@@ -383,8 +474,9 @@ def compute_upsell(
     overrides: dict[str, dict] | None = None,
     ric_overrides: dict[str, dict] | None = None,
     item_exceptions: list[dict] | None = None,
-) -> tuple[list[UpsellRow], dict, dict, list[str]]:
+) -> tuple[list[UpsellRow], list[PricingRow], dict, dict, list[str]]:
     suggestions: list[UpsellRow] = []
+    pricing_rows: list[PricingRow] = []
     trace_rows: list[dict] = []
     warnings: list[str] = []
     overrides = overrides or {}
@@ -438,6 +530,7 @@ def compute_upsell(
         max_discount_effective = pricing_payload["max_discount_effective"]
         max_discount_effective_pct = pricing_payload["max_discount_effective_pct"]
         desired_discount_pct = pricing_payload["desired_discount_pct"]
+        effective_discount_pct = pricing_payload["effective_discount_pct"]
         candidate_price = pricing_payload["candidate_price"]
         computed_price = pricing_payload["final_price"]
         final_ric = pricing_payload["final_ric"]
@@ -459,6 +552,7 @@ def compute_upsell(
                 discount_override=discount_override,
             )
             desired_discount_pct = pricing_payload["desired_discount_pct"]
+            effective_discount_pct = pricing_payload["effective_discount_pct"]
             computed_price = pricing_payload["final_price"]
             final_ric = pricing_payload["final_ric"]
             applied_discount_pct = pricing_payload["applied_discount_pct"]
@@ -509,6 +603,22 @@ def compute_upsell(
                 disponibile_dal=available_date,
             )
         )
+        pricing_rows.append(
+            build_pricing_row(
+                codice=item.codice,
+                descrizione=item.descrizione,
+                categoria=macro,
+                lm=lm_value,
+                ric_base=ric_base,
+                ric_min=ric_floor,
+                sconto_fisso=fixed_discount,
+                max_discount_percent=pricing.max_discount_percent,
+                aggressivity=pricing.aggressivity,
+                listino=client.listino,
+                logger=logger,
+                requested_discount_override=discount_override,
+            )
+        )
         trace_rows.append(
             {
                 "sku": item.codice,
@@ -539,6 +649,7 @@ def compute_upsell(
                 "discount_override": discount_override,
                 "unit_price_override": unit_price_override,
                 "desired_discount_pct": desired_discount_pct,
+                "effective_discount_pct": effective_discount_pct,
                 "capped_discount_pct": max_discount_effective_pct,
                 "applied_discount_pct": applied_discount_pct,
                 "clamp_reason": clamp_reason,
@@ -558,7 +669,7 @@ def compute_upsell(
                 "formula": (
                     f"Baseline = LM * (1 + {ric_base:.2f}%) = {baseline_price:.2f}; "
                     f"Floor = LM * (1 + {ric_floor:.2f}%) = {floor_price:.2f}; "
-                    f"Prezzo finale = max(Baseline * (1 - {desired_discount_pct:.2f}%), Floor)"
+                    f"Prezzo finale = max(Baseline * (1 - {effective_discount_pct:.2f}%), Floor)"
                 ),
             }
         )
@@ -621,7 +732,62 @@ def compute_upsell(
     }
     logger.info("Computed %s upsell rows", len(suggestions))
     validation = {"ok": len(errors) == 0, "errors": errors}
-    return suggestions[:3], trace, validation, warnings
+    return suggestions[:3], pricing_rows[:3], trace, validation, warnings
+
+
+def self_test_pricing_rows() -> None:
+    logger = SessionLogger(Path("logs"))
+    sconti = {
+        "CAT-A": {"RIV": {"ric": 11, "ric_base": 20, "discount": 0}},
+        "CAT-B": {"RIV": {"ric": 17, "ric_base": 20, "discount": 0}},
+        "CAT-C": {"RIV": {"ric": 25, "ric_base": 35, "discount": 0}},
+    }
+    ric_overrides: dict[str, dict] = {}
+    listino = "LISTINO RI"
+    items = [
+        {"codice": "TEST-1", "descrizione": "Riga A", "categoria": "CAT-A", "lm": 100.0},
+        {"codice": "TEST-2", "descrizione": "Riga B", "categoria": "CAT-B", "lm": 120.0},
+        {"codice": "TEST-3", "descrizione": "Riga C", "categoria": "CAT-C", "lm": 80.0},
+    ]
+    max_sconto = 7.0
+    aggressivita = 100.0
+    rows: list[PricingRow] = []
+    for item in items:
+        ric_values = resolve_ric_values(
+            macro=item["categoria"],
+            listino=listino,
+            sconti=sconti,
+            ric_overrides=ric_overrides,
+        )
+        rows.append(
+            build_pricing_row(
+                codice=item["codice"],
+                descrizione=item["descrizione"],
+                categoria=item["categoria"],
+                lm=item["lm"],
+                ric_base=float(ric_values["ric_base"]),
+                ric_min=float(ric_values["ric_floor"]),
+                sconto_fisso=0.0,
+                max_discount_percent=max_sconto,
+                aggressivity=aggressivita,
+                listino=listino,
+                logger=logger,
+            )
+        )
+    print("=== SELF TEST PRICING ===")
+    for row in rows:
+        print(
+            f"{row.codice} | cap={row.sconto_cap:.2f}% | richiesto={row.sconto_richiesto:.2f}% | "
+            f"effettivo={row.sconto_effettivo:.2f}% | prezzo_finale={row.prezzo_finale:.2f}"
+        )
+    has_full = any(abs(row.sconto_effettivo - 7.0) < 0.05 for row in rows)
+    has_clamped = any(2.0 <= row.sconto_effettivo <= 3.0 for row in rows)
+    print(f"Check: almeno una riga a 7% -> {has_full}")
+    print(f"Check: almeno una riga clamp ~2-3% -> {has_clamped}")
+
+
+if __name__ == "__main__":
+    self_test_pricing_rows()
 
 
 def export_excel(rows: list[UpsellRow], client: ClientInfo, order_file: str, output_dir: Path) -> Path:
