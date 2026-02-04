@@ -72,7 +72,7 @@ class AppState:
     field_mapping: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     histories: list[Path] = field(default_factory=list)
     current_order: Path | None = None
-    causale: str | None = None
+    causale: str | None = CAUSALI[0]
     selected_client_id: str | None = None
     upsell_rows: list[UpsellRow] = field(default_factory=list)
     pricing_rows: list[PricingRow] = field(default_factory=list)
@@ -514,8 +514,8 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
         raise ValueError("Cliente non selezionato")
     STATE.copy_block = build_copy_block(STATE.upsell_rows, client, order_name, STATE.causale or "")
     rows = STATE.upsell_rows
-    non_alt_rows = [row for row in rows if row.clamp_reason != "ALT_LOCKED"]
-    alt_rows = [row for row in rows if row.clamp_reason == "ALT_LOCKED"]
+    non_alt_rows = [row for row in rows if not row.alt_selected]
+    alt_rows = [row for row in rows if row.alt_selected]
     totals_lines = len(rows)
     total_qty = sum(row.qty for row in rows)
     subtotal_final_exvat = sum(row.prezzo_unit * row.qty for row in rows)
@@ -579,18 +579,6 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
                     "type": "ALT_MISSING",
                     "sku": row.codice,
                     "message": f"{row.codice}: ALT selezionato ma PREZZO_ALT assente.",
-                }
-            )
-    for row in alt_rows:
-        if row.prezzo_alt is not None and abs(row.prezzo_unit - row.prezzo_alt) > 0.001:
-            discrepancies.append(
-                {
-                    "type": "ALT_MISMATCH",
-                    "sku": row.codice,
-                    "message": (
-                        f"{row.codice}: prezzo ALT attivo ma prezzo finale {row.prezzo_unit:.2f} "
-                        f"diverso da PREZZO_ALT {row.prezzo_alt:.2f}."
-                    ),
                 }
             )
     has_blocking_issues = bool(discrepancies)

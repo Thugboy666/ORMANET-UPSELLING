@@ -521,34 +521,37 @@ HTML = """
             </select>
           </div>
           <div>
-            <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
-              Max sconto (utente) (%)
-            </label>
-            <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
-            <div class="info" id="maxDiscountHint"></div>
-          </div>
-          <div>
-            <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
-              Arrotondamento
-            </label>
-            <select id="roundingMode">
-              <option value="NONE">NONE</option>
-              <option value="0.01">0.01</option>
-              <option value="0.05">0.05</option>
-              <option value="0.10">0.10</option>
-            </select>
-          </div>
-          <div>
             <label class="inline">
               <input type="checkbox" id="altModeToggle" />
               Modalità ALTOVENDENTI
             </label>
-            <div class="info" id="altModeInfo">PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.</div>
-            <div class="info">Quando attivo ALT, il prezzo promo è fisso (da STOCK) e non applica sconti.</div>
+            <div class="info" id="altModeInfo">PREZZO_ALT = LM di partenza per articoli altovendenti.</div>
+            <div class="info">Quando attivo ALT, il calcolo segue le regole normali (RIC + sconti).</div>
           </div>
           <details class="advanced-panel">
             <summary>Avanzate</summary>
             <div class="advanced-content">
+              <div>
+                <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
+                  Cap sconto (%) - utente
+                </label>
+                <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
+                <div class="info" id="maxDiscountHint"></div>
+                <div class="actions inline">
+                  <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
+                </div>
+              </div>
+              <div>
+                <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
+                  Arrotondamento
+                </label>
+                <select id="roundingMode">
+                  <option value="NONE">NONE</option>
+                  <option value="0.01">0.01</option>
+                  <option value="0.05">0.05</option>
+                  <option value="0.10">0.10</option>
+                </select>
+              </div>
               <div>
                 <label for="bufferRic">Buffer ric (%)</label>
                 <input type="number" id="bufferRic" min="0" step="0.1" value="2" readonly />
@@ -556,12 +559,6 @@ HTML = """
                   <input type="checkbox" id="bufferRicOverrideToggle" />
                   Override avanzato
                 </label>
-              </div>
-              <div>
-                <label>Cap sconto</label>
-                <div class="actions inline">
-                  <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
-                </div>
               </div>
             </div>
           </details>
@@ -1298,7 +1295,7 @@ HTML = """
         altModeInfo.textContent =
           altAvailableCount === 0
             ? "PREZZO_ALT non presente nello stock: modalità ALT disattivata."
-            : "PREZZO_ALT = prezzo promo ex IVA per articoli altovendenti.";
+            : "PREZZO_ALT = LM di partenza per articoli altovendenti.";
         if (altAvailableCount === 0) {
           globalParams.alt_mode = false;
           altModeToggle.checked = false;
@@ -1369,17 +1366,10 @@ HTML = """
         totalsGrid.innerHTML = "";
         totalsPanel.classList.toggle("error", Boolean(hasBlocking));
         const items = [
-          ["Totale NON-ALT", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
-          ["Totale ALT", formatCurrency(totals?.subtotal_alt_exvat)],
-          ["Totale complessivo", formatCurrency(totals?.subtotal_final_exvat)],
-          [
-            "Risparmio vs baseline (NON-ALT)",
-            formatCurrency(totals?.savings_vs_baseline_non_alt_exvat)
-          ],
-          [
-            "RIC% NON-ALT (min/medio/max)",
-            `${formatPercent(totals?.min_final_ric_non_alt)} / ${formatPercent(totals?.avg_final_ric_non_alt)} / ${formatPercent(totals?.max_final_ric_non_alt)}`
-          ]
+          ["Totale prodotti standard", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
+          ["Totale prodotti ALT", formatCurrency(totals?.subtotal_alt_exvat)],
+          ["Totale preventivo", formatCurrency(totals?.subtotal_final_exvat)],
+          ["Margine medio NON-ALT", formatPercent(totals?.avg_final_ric_non_alt)]
         ];
         items.forEach(([label, value]) => {
           const div = document.createElement("div");
@@ -1415,7 +1405,6 @@ HTML = """
         const errorSkus = new Set((validation?.errors || []).map((err) => err.sku));
         rows.forEach((row) => {
           const tr = document.createElement("tr");
-          const isAltLocked = row.clamp_reason === "ALT_LOCKED";
           if (row.alt_selected) {
             tr.classList.add("row-alt");
           }
@@ -1427,7 +1416,6 @@ HTML = """
           const lockInput = document.createElement("input");
           lockInput.type = "checkbox";
           lockInput.checked = Boolean(perRowOverrides[row.codice]?.lock);
-          lockInput.disabled = isAltLocked;
           lockInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.lock = lockInput.checked;
@@ -1504,91 +1492,80 @@ HTML = """
           tr.appendChild(lmCell);
 
           const fixedDiscountCell = document.createElement("td");
-          fixedDiscountCell.textContent = isAltLocked ? "–" : Number(row.fixed_discount_percent).toFixed(2);
+          fixedDiscountCell.textContent = Number(row.fixed_discount_percent).toFixed(2);
           tr.appendChild(fixedDiscountCell);
 
           const ricBasePercentCell = document.createElement("td");
-          ricBasePercentCell.textContent = isAltLocked ? "–" : Number(row.ric_base).toFixed(2);
+          ricBasePercentCell.textContent = Number(row.ric_base).toFixed(2);
           tr.appendChild(ricBasePercentCell);
 
           const basePriceCell = document.createElement("td");
-          basePriceCell.textContent = isAltLocked ? "–" : Number(row.customer_base_price).toFixed(2);
+          basePriceCell.textContent = Number(row.customer_base_price).toFixed(2);
           tr.appendChild(basePriceCell);
 
           const floorPriceCell = document.createElement("td");
-          floorPriceCell.textContent = isAltLocked ? "–" : formatNumber(row.min_unit_price);
+          floorPriceCell.textContent = formatNumber(row.min_unit_price);
           tr.appendChild(floorPriceCell);
 
           const discountCell = document.createElement("td");
-          if (isAltLocked) {
-            discountCell.textContent = "–";
-          } else {
-            const discountInput = document.createElement("input");
-            discountInput.type = "number";
-            discountInput.step = "0.1";
-            discountInput.min = "0";
-            discountInput.value = Number(row.desired_discount_pct).toFixed(2);
-            discountInput.disabled = currentPriceMode !== "discount";
-            discountInput.addEventListener("change", () => {
-              const override = perRowOverrides[row.codice] || {};
-              override.discount_override = Number(discountInput.value);
-              delete override.unit_price_override;
-              perRowOverrides[row.codice] = override;
-              scheduleRecalc();
-            });
-            discountCell.appendChild(discountInput);
-          }
+          const discountInput = document.createElement("input");
+          discountInput.type = "number";
+          discountInput.step = "0.1";
+          discountInput.min = "0";
+          discountInput.value = Number(row.desired_discount_pct).toFixed(2);
+          discountInput.disabled = currentPriceMode !== "discount";
+          discountInput.addEventListener("change", () => {
+            const override = perRowOverrides[row.codice] || {};
+            override.discount_override = Number(discountInput.value);
+            delete override.unit_price_override;
+            perRowOverrides[row.codice] = override;
+            scheduleRecalc();
+          });
+          discountCell.appendChild(discountInput);
           tr.appendChild(discountCell);
 
           const capCell = document.createElement("td");
           const pricingRow = pricingByCode.get(row.codice);
           const capValue = pricingRow?.sconto_cap ?? row.max_discount_real_pct;
-          capCell.textContent = isAltLocked
-            ? "–"
-            : capValue !== undefined && capValue !== null
+          capCell.textContent =
+            capValue !== undefined && capValue !== null
               ? Number(capValue).toFixed(2)
               : "";
           tr.appendChild(capCell);
 
           const appliedDiscountCell = document.createElement("td");
           const effectiveValue = pricingRow?.sconto_effettivo ?? row.applied_discount_pct;
-          appliedDiscountCell.textContent = isAltLocked ? "–" : Number(effectiveValue).toFixed(2);
+          appliedDiscountCell.textContent = Number(effectiveValue).toFixed(2);
           tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
-          if (isAltLocked) {
-            priceCell.textContent = Number(row.prezzo_unit).toFixed(2);
-          } else {
-            const priceInput = document.createElement("input");
-            priceInput.type = "number";
-            priceInput.step = "0.01";
-            priceInput.min = "0";
-            priceInput.value = Number(row.prezzo_unit).toFixed(2);
-            priceInput.disabled = currentPriceMode !== "final_price";
-            priceInput.addEventListener("change", () => {
-              const override = perRowOverrides[row.codice] || {};
-              override.unit_price_override = Number(priceInput.value);
-              delete override.discount_override;
-              perRowOverrides[row.codice] = override;
-              scheduleRecalc();
-            });
-            priceCell.appendChild(priceInput);
-          }
+          const priceInput = document.createElement("input");
+          priceInput.type = "number";
+          priceInput.step = "0.01";
+          priceInput.min = "0";
+          priceInput.value = Number(row.prezzo_unit).toFixed(2);
+          priceInput.disabled = currentPriceMode !== "final_price";
+          priceInput.addEventListener("change", () => {
+            const override = perRowOverrides[row.codice] || {};
+            override.unit_price_override = Number(priceInput.value);
+            delete override.discount_override;
+            perRowOverrides[row.codice] = override;
+            scheduleRecalc();
+          });
+          priceCell.appendChild(priceInput);
           tr.appendChild(priceCell);
 
           const ricCell = document.createElement("td");
-          ricCell.textContent = isAltLocked ? "–" : Number(row.final_ric_percent).toFixed(2);
+          ricCell.textContent = Number(row.final_ric_percent).toFixed(2);
           tr.appendChild(ricCell);
 
           const ricMinCell = document.createElement("td");
-          ricMinCell.textContent = isAltLocked ? "–" : formatNumber(row.required_ric);
+          ricMinCell.textContent = formatNumber(row.required_ric);
           tr.appendChild(ricMinCell);
 
           const noteCell = document.createElement("td");
           if (row.clamp_reason === "MIN_RIC_FLOOR") {
             noteCell.textContent = `Sconto bloccato: pavimento RIC minimo ${Number(row.required_ric).toFixed(2)}% (prezzo minimo=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)})`;
-          } else if (row.clamp_reason === "ALT_LOCKED") {
-            noteCell.textContent = row.note || "ALT: prezzo promo fisso (non scontabile)";
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
           } else if (row.note) {
