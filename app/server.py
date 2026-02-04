@@ -572,15 +572,6 @@ def build_quote_payload(order_name: str) -> dict[str, Any]:
                     ),
                 }
             )
-    for row in rows:
-        if row.alt_selected and not row.alt_available:
-            discrepancies.append(
-                {
-                    "type": "ALT_MISSING",
-                    "sku": row.codice,
-                    "message": f"{row.codice}: ALT selezionato ma PREZZO_ALT assente.",
-                }
-            )
     has_blocking_issues = bool(discrepancies)
     response = {
         "ok": True,

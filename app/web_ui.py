@@ -220,13 +220,37 @@ HTML = """
         overflow-x: auto;
       }
       .controls {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        display: flex;
+        flex-direction: column;
         gap: 12px;
         background: #fffaf5;
         padding: 12px;
         border-radius: 8px;
         border: 1px solid #f0d6bf;
+      }
+      .controls-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        align-items: end;
+      }
+      .controls-row.alt-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .controls-row.actions-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+      }
+      .alt-block {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
       .controls label {
         margin-top: 0;
@@ -279,15 +303,49 @@ HTML = """
         padding: 12px;
         margin-top: 12px;
       }
+      .summary-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      .summary-badge {
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        background: #e6f4ea;
+        color: #0a7d2c;
+      }
+      .summary-badge.warning {
+        background: #fff4e0;
+        color: #7a2d00;
+      }
       .summary-panel.error {
         border-color: #f3b1b1;
         background: #fff0f0;
       }
       .summary-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 8px;
-        font-size: 13px;
+        grid-template-columns: repeat(4, minmax(160px, 1fr));
+        gap: 10px;
+      }
+      .summary-item {
+        background: #ffffff;
+        border-radius: 8px;
+        padding: 8px 10px;
+        border: 1px solid #e2ecf6;
+      }
+      .summary-label {
+        font-size: 12px;
+        color: #4a4a4a;
+        margin-bottom: 4px;
+      }
+      .summary-value {
+        font-size: 18px;
+        font-weight: 700;
+        color: #1c1c1c;
       }
       .summary-discrepancies {
         margin-top: 10px;
@@ -497,61 +555,71 @@ HTML = """
       <div class="panel main-panel">
         <h3>Preventivo (Quote)</h3>
         <div class="controls">
-          <div>
-            <label for="aggressivityRange" title="Aumenta lo sconto commerciale (entro i limiti di ric minimo).">
-              Aggressività (0-100)
-            </label>
-            <div class="inline">
-              <input type="range" id="aggressivityRange" min="0" max="100" value="0" />
-              <span class="value" id="aggressivityValue">0</span>
+          <div class="controls-row">
+            <div>
+              <label for="aggressivityRange" title="Aumenta lo sconto commerciale (entro i limiti di ric minimo).">
+                Aggressività (0-100)
+              </label>
+              <div class="inline">
+                <input type="range" id="aggressivityRange" min="0" max="100" value="0" />
+                <span class="value" id="aggressivityValue">0</span>
+              </div>
+            </div>
+            <div>
+              <label for="priceMode">Modalità prezzo</label>
+              <select id="priceMode">
+                <option value="discount">Sconto %</option>
+                <option value="final_price">Prezzo finale</option>
+              </select>
+            </div>
+            <div>
+              <label for="aggressivityMode">Modalità aggressività</label>
+              <select id="aggressivityMode">
+                <option value="discount_from_baseline">Sconto da baseline</option>
+                <option value="target_ric_reduction">Riduzione ric target</option>
+              </select>
+            </div>
+            <div>
+              <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
+                Max sconto utente (%)
+              </label>
+              <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
+              <div class="info" id="maxDiscountHint"></div>
+            </div>
+            <div>
+              <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
+                Arrotondamento
+              </label>
+              <select id="roundingMode">
+                <option value="NONE">NONE</option>
+                <option value="0.01">0.01</option>
+                <option value="0.05">0.05</option>
+                <option value="0.10">0.10</option>
+              </select>
             </div>
           </div>
-          <div>
-            <label for="priceMode">Modalità prezzo</label>
-            <select id="priceMode">
-              <option value="discount">Sconto %</option>
-              <option value="final_price">Prezzo finale</option>
-            </select>
+          <div class="controls-row alt-row">
+            <div class="alt-block">
+              <label class="inline">
+                <input type="checkbox" id="altModeToggle" />
+                Modalità ALTOVENDENTI
+              </label>
+              <div class="info" id="altModeInfo">ALT: prezzo calcolato da PREZZO_ALT + RIC.BASE (non scontabile).</div>
+            </div>
+            <div class="actions inline">
+              <button id="recalcBtn">Ricalcola</button>
+              <button id="resetOverridesBtn" class="secondary">Reset override</button>
+            </div>
           </div>
-          <div>
-            <label for="aggressivityMode">Modalità aggressività</label>
-            <select id="aggressivityMode">
-              <option value="discount_from_baseline">Sconto da baseline</option>
-              <option value="target_ric_reduction">Riduzione ric target</option>
-            </select>
-          </div>
-          <div>
+          <div class="controls-row actions-row">
             <label class="inline">
-              <input type="checkbox" id="altModeToggle" />
-              Modalità ALTOVENDENTI
+              <input type="checkbox" id="toggleTrace" checked />
+              Mostra dettagli
             </label>
-            <div class="info" id="altModeInfo">PREZZO_ALT = LM di partenza per articoli altovendenti.</div>
-            <div class="info">Quando attivo ALT, il calcolo segue le regole normali (RIC + sconti).</div>
           </div>
           <details class="advanced-panel">
             <summary>Avanzate</summary>
             <div class="advanced-content">
-              <div>
-                <label for="maxDiscount" title="Valore massimo inserito dall'utente (non viene clippato automaticamente).">
-                  Cap sconto (%) - utente
-                </label>
-                <input type="number" id="maxDiscount" min="0" step="0.1" value="10" />
-                <div class="info" id="maxDiscountHint"></div>
-                <div class="actions inline">
-                  <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
-                </div>
-              </div>
-              <div>
-                <label for="roundingMode" title="Arrotonda il prezzo finale senza scendere sotto il pavimento.">
-                  Arrotondamento
-                </label>
-                <select id="roundingMode">
-                  <option value="NONE">NONE</option>
-                  <option value="0.01">0.01</option>
-                  <option value="0.05">0.05</option>
-                  <option value="0.10">0.10</option>
-                </select>
-              </div>
               <div>
                 <label for="bufferRic">Buffer ric (%)</label>
                 <input type="number" id="bufferRic" min="0" step="0.1" value="2" readonly />
@@ -560,18 +628,14 @@ HTML = """
                   Override avanzato
                 </label>
               </div>
+              <div>
+                <label>Reset cap sconto utente</label>
+                <div class="actions inline">
+                  <button id="resetMaxDiscount" class="secondary" type="button">Reset cap</button>
+                </div>
+              </div>
             </div>
           </details>
-          <div class="actions inline">
-            <button id="recalcBtn">Ricalcola</button>
-            <button id="resetOverridesBtn" class="secondary">Reset override</button>
-          </div>
-          <div class="actions inline">
-            <label class="inline">
-              <input type="checkbox" id="toggleTrace" checked />
-              Mostra dettagli
-            </label>
-          </div>
         </div>
         <div class="banner warning" id="clampBanner" style="display:none"></div>
         <div class="banner error" id="ricOverrideBanner" style="display:none"></div>
@@ -602,7 +666,10 @@ HTML = """
           </table>
         </div>
         <div class="summary-panel" id="totalsPanel">
-          <h4>Riepilogo preventivo</h4>
+          <div class="summary-header">
+            <h4>Riepilogo preventivo</h4>
+            <span class="summary-badge" id="summaryBadge">OK</span>
+          </div>
           <div class="summary-grid" id="totalsGrid"></div>
           <div class="summary-discrepancies" id="totalsDiscrepancies" style="display:none"></div>
         </div>
@@ -746,6 +813,7 @@ HTML = """
       const totalsPanel = document.getElementById("totalsPanel");
       const totalsGrid = document.getElementById("totalsGrid");
       const totalsDiscrepancies = document.getElementById("totalsDiscrepancies");
+      const summaryBadge = document.getElementById("summaryBadge");
       const clampBanner = document.getElementById("clampBanner");
       const ricOverrideBanner = document.getElementById("ricOverrideBanner");
       const mappingBtn = document.getElementById("mappingBtn");
@@ -1295,7 +1363,7 @@ HTML = """
         altModeInfo.textContent =
           altAvailableCount === 0
             ? "PREZZO_ALT non presente nello stock: modalità ALT disattivata."
-            : "PREZZO_ALT = LM di partenza per articoli altovendenti.";
+            : "ALT: prezzo calcolato da PREZZO_ALT + RIC.BASE (non scontabile).";
         if (altAvailableCount === 0) {
           globalParams.alt_mode = false;
           altModeToggle.checked = false;
@@ -1355,6 +1423,13 @@ HTML = """
         return `€ ${Number(value).toFixed(2)}`;
       }
 
+      function formatCount(value) {
+        if (value === null || value === undefined || Number.isNaN(value) || !Number.isFinite(value)) {
+          return "–";
+        }
+        return Number(value).toFixed(0);
+      }
+
       function formatPercent(value) {
         if (value === null || value === undefined || Number.isNaN(value) || !Number.isFinite(value)) {
           return "–";
@@ -1365,19 +1440,29 @@ HTML = """
       function renderTotals(totals, discrepancies, hasBlocking, summaryWarnings) {
         totalsGrid.innerHTML = "";
         totalsPanel.classList.toggle("error", Boolean(hasBlocking));
+        summaryBadge.textContent = hasBlocking ? "ATTENZIONE" : "OK";
+        summaryBadge.classList.toggle("warning", Boolean(hasBlocking));
         const items = [
-          ["Totale prodotti standard", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
-          ["Totale prodotti ALT", formatCurrency(totals?.subtotal_alt_exvat)],
-          ["Totale preventivo", formatCurrency(totals?.subtotal_final_exvat)],
-          ["Margine medio NON-ALT", formatPercent(totals?.avg_final_ric_non_alt)]
+          ["Totale righe", formatCount(totals?.lines_count)],
+          ["Totale pezzi", formatCount(totals?.total_qty)],
+          ["Totale € (IVA escl.)", formatCurrency(totals?.subtotal_final_exvat)],
+          ["Totale ALT", formatCurrency(totals?.subtotal_alt_exvat)],
+          ["Totale NON-ALT", formatCurrency(totals?.subtotal_non_alt_final_exvat)],
+          ["Risparmio vs baseline (NON-ALT)", formatCurrency(totals?.savings_vs_baseline_non_alt_exvat)],
+          [
+            "Margine RIC% NON-ALT (min/medio/max)",
+            `${formatPercent(totals?.min_final_ric_non_alt)} / ${formatPercent(
+              totals?.avg_final_ric_non_alt
+            )} / ${formatPercent(totals?.max_final_ric_non_alt)}`
+          ]
         ];
         items.forEach(([label, value]) => {
           const div = document.createElement("div");
-          if (value === "") {
-            div.innerHTML = `<strong>${label}</strong>`;
-          } else {
-            div.innerHTML = `<strong>${label}:</strong> ${value}`;
-          }
+          div.className = "summary-item";
+          div.innerHTML = `
+            <div class="summary-label">${label}</div>
+            <div class="summary-value">${value}</div>
+          `;
           totalsGrid.appendChild(div);
         });
         const issues = [...(summaryWarnings || []), ...(discrepancies || []).map((item) => item.message || item)];
@@ -1405,7 +1490,8 @@ HTML = """
         const errorSkus = new Set((validation?.errors || []).map((err) => err.sku));
         rows.forEach((row) => {
           const tr = document.createElement("tr");
-          if (row.alt_selected) {
+          const isAlt = Boolean(row.alt_selected);
+          if (isAlt) {
             tr.classList.add("row-alt");
           }
           if (errorSkus.has(row.codice)) {
@@ -1504,7 +1590,7 @@ HTML = """
           tr.appendChild(basePriceCell);
 
           const floorPriceCell = document.createElement("td");
-          floorPriceCell.textContent = formatNumber(row.min_unit_price);
+          floorPriceCell.textContent = isAlt ? "—" : formatNumber(row.min_unit_price);
           tr.appendChild(floorPriceCell);
 
           const discountCell = document.createElement("td");
@@ -1513,7 +1599,7 @@ HTML = """
           discountInput.step = "0.1";
           discountInput.min = "0";
           discountInput.value = Number(row.desired_discount_pct).toFixed(2);
-          discountInput.disabled = currentPriceMode !== "discount";
+          discountInput.disabled = currentPriceMode !== "discount" || isAlt;
           discountInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.discount_override = Number(discountInput.value);
@@ -1528,14 +1614,14 @@ HTML = """
           const pricingRow = pricingByCode.get(row.codice);
           const capValue = pricingRow?.sconto_cap ?? row.max_discount_real_pct;
           capCell.textContent =
-            capValue !== undefined && capValue !== null
-              ? Number(capValue).toFixed(2)
-              : "";
+            isAlt || capValue === undefined || capValue === null
+              ? "—"
+              : Number(capValue).toFixed(2);
           tr.appendChild(capCell);
 
           const appliedDiscountCell = document.createElement("td");
           const effectiveValue = pricingRow?.sconto_effettivo ?? row.applied_discount_pct;
-          appliedDiscountCell.textContent = Number(effectiveValue).toFixed(2);
+          appliedDiscountCell.textContent = isAlt ? "—" : Number(effectiveValue).toFixed(2);
           tr.appendChild(appliedDiscountCell);
 
           const priceCell = document.createElement("td");
@@ -1544,7 +1630,7 @@ HTML = """
           priceInput.step = "0.01";
           priceInput.min = "0";
           priceInput.value = Number(row.prezzo_unit).toFixed(2);
-          priceInput.disabled = currentPriceMode !== "final_price";
+          priceInput.disabled = currentPriceMode !== "final_price" || isAlt;
           priceInput.addEventListener("change", () => {
             const override = perRowOverrides[row.codice] || {};
             override.unit_price_override = Number(priceInput.value);
@@ -1560,11 +1646,13 @@ HTML = """
           tr.appendChild(ricCell);
 
           const ricMinCell = document.createElement("td");
-          ricMinCell.textContent = formatNumber(row.required_ric);
+          ricMinCell.textContent = isAlt ? "—" : formatNumber(row.required_ric);
           tr.appendChild(ricMinCell);
 
           const noteCell = document.createElement("td");
-          if (row.clamp_reason === "MIN_RIC_FLOOR") {
+          if (isAlt && row.note) {
+            noteCell.textContent = row.note;
+          } else if (row.clamp_reason === "MIN_RIC_FLOOR") {
             noteCell.textContent = `Sconto bloccato: pavimento RIC minimo ${Number(row.required_ric).toFixed(2)}% (prezzo minimo=${Number(row.min_unit_price).toFixed(2)}; baseline=${Number(row.customer_base_price).toFixed(2)})`;
           } else if (row.clamp_reason) {
             noteCell.textContent = row.clamp_reason;
@@ -1681,8 +1769,10 @@ HTML = """
         if (status.causale) {
           causaleSelect.value = status.causale;
         }
-        if (!status.causale && !causaleInitialized) {
+        const hasValidCausale = Boolean(status.causale) && Boolean(status.causale_set);
+        if (!hasValidCausale && !causaleInitialized) {
           causaleInitialized = true;
+          causaleSelect.value = "DISPONIBILE";
           await api("/api/set_causale", { causale: causaleSelect.value });
           await refreshStatus();
           return;
