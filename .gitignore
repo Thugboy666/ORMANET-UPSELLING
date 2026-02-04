@@ -18,6 +18,7 @@ __pycache__/
 # LOCAL DATA (NEVER COMMIT)
 # =========================
 /import/
+/import/*.xlsx
 /logs/
 /output/
 
@@ -48,5 +49,6 @@ Thumbs.db
 # SAFETY
 # =========================
 *.xlsx
+**/*.xlsx
 *.csv
 *.zip
